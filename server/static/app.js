@@ -38,17 +38,17 @@ const LABELS = {
   full_name: "Full name",
   address: "Address",
   date_of_birth: "Date of birth",
-  is_student: "Current student",
+  is_student: "Student status",
   over_18: "Over 18",
   student_id: "Student ID",
-  program: "Program",
+  program: "Program of study",
   enrolment_year: "Enrolment year",
-  customer_since: "Customer since",
-  is_tenant: "Current tenant",
-  tenancy_start: "Tenancy start",
+  customer_since: "Bank customer since",
+  is_tenant: "Current tenancy",
+  tenancy_start: "Tenancy start date",
 };
 const label = (field) => LABELS[field] || field;
 const show = (value) => (value === true ? "Yes" : value === false ? "No" : String(value));
 
-// The last part of the address, e.g. "/company/stride-sportswear" -> "stride-sportswear".
-const lastPathPart = () => location.pathname.split("/").filter(Boolean).pop();
+// The value after ?name= in the page address, or a fallback.
+const queryParam = (name, fallback) => new URLSearchParams(location.search).get(name) || fallback;

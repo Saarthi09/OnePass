@@ -1,7 +1,7 @@
 //! The company's side of OnePass.
 //!
-//! A company (a recruiter, a shop, a phone carrier) asks OnePass for facts
-//! about a person. It never learns which institution a fact came from. What
+//! A company (a recruiter, a shop, a phone carrier) uses the requester page to
+//! ask OnePass for facts about a person. It never learns which institution a fact came from. What
 //! it receives is each fact stamped "verified by OnePass": signed with
 //! OnePass's own key.
 //!
@@ -19,44 +19,46 @@ use serde_json::Value;
 /// The registry "kind" that marks OnePass's own verifier key.
 pub const VERIFIER_KIND: &str = "verifier";
 
-/// A demo company and what it asks for.
+/// Every fact a company may ask for.
+pub const FIELDS: &[&str] = &[
+    "full_name",
+    "date_of_birth",
+    "over_18",
+    "address",
+    "is_student",
+    "program",
+    "enrolment_year",
+    "student_id",
+    "is_tenant",
+    "tenancy_start",
+    "customer_since",
+];
+
+/// A ready-made bundle of facts for a common purpose, offered as a shortcut
+/// on the requester page.
 #[derive(Clone, Serialize)]
-pub struct Company {
-    pub id: &'static str,
+pub struct Preset {
     pub name: &'static str,
-    pub tagline: &'static str,
-    pub action: &'static str,
-    pub success: &'static str,
-    /// The facts it wants, by name. It does not get to say where they come from.
-    pub wants: Vec<&'static str>,
+    pub reason: &'static str,
+    pub fields: Vec<&'static str>,
 }
 
-/// The invented companies used in the demo.
-pub fn companies() -> Vec<Company> {
+pub fn presets() -> Vec<Preset> {
     vec![
-        Company {
-            id: "stride-sportswear",
-            name: "Stride Sportswear",
-            tagline: "20% off for students. No student card photos, no forms.",
-            action: "Get student discount",
-            success: "Student discount applied",
-            wants: vec!["is_student"],
+        Preset {
+            name: "Student discount",
+            reason: "To confirm you qualify for our student discount",
+            fields: vec!["is_student"],
         },
-        Company {
-            id: "brightline-mobile",
-            name: "Brightline Mobile",
-            tagline: "Open a phone plan in one tap. No forms, no document uploads.",
-            action: "Sign up",
-            success: "Account opened",
-            wants: vec!["full_name", "address", "date_of_birth"],
+        Preset {
+            name: "Account sign-up",
+            reason: "To open your account without a form",
+            fields: vec!["full_name", "address", "date_of_birth"],
         },
-        Company {
-            id: "harbour-talent",
-            name: "Harbour Talent",
-            tagline: "Recruiter background check: identity and education, without the paperwork.",
-            action: "Send background check",
-            success: "Background check complete",
-            wants: vec!["full_name", "date_of_birth", "address", "is_student", "program"],
+        Preset {
+            name: "Background check",
+            reason: "Background check for your job application",
+            fields: vec!["full_name", "date_of_birth", "address", "is_student"],
         },
     ]
 }
@@ -85,7 +87,7 @@ pub struct Verdict {
 
 /// Run the company's checks on what OnePass delivered.
 pub fn verify(
-    wants: &[&str],
+    wants: &[String],
     delivered: &[SignedFact],
     trusted: &[TrustedSource],
     registry: String,

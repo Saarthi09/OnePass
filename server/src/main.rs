@@ -1,9 +1,11 @@
 //! The OnePass server.
 //!
 //! How one request travels:
-//!   1. A company asks OnePass for facts about a person (e.g. "is a student").
-//!   2. The person gets a notification and approves or denies. They also see,
-//!      and can choose, which of their institutions each fact will come from.
+//!   1. A company fills in the requester page: who it is about, which facts it
+//!      needs, and why.
+//!   2. That person gets a notification on their OnePass page and approves or
+//!      denies. They also see, and can choose, which of their institutions each
+//!      fact will come from.
 //!   3. Only after approval, OnePass fetches each fact from that institution.
 //!   4. OnePass checks the institution's signature and checks on the Stellar
 //!      registry that the institution is genuine. If not, it refuses.
@@ -13,15 +15,15 @@
 //!   7. OnePass records a fingerprint of what it vouched for on Stellar, as a
 //!      permanent receipt, and forgets the facts.
 //!
-//! It also serves the web pages, including the invented demo companies.
-//! Everything is kept in memory, so restarting the server resets the demo.
+//! It also serves the web pages: the landing page, the person's page and the
+//! requester page. Everything is kept in memory, so restarting resets the demo.
 
 mod company;
 mod directory;
 mod registry;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -41,6 +43,14 @@ use std::{
 /// Where the stand-in institutions are running.
 const SOURCES_URL: &str = "http://127.0.0.1:4001";
 
+/// The people who have a OnePass identity in the demo: (OnePass ID, name).
+/// The ID is also their username at the stand-in institutions.
+const USERS: &[(&str, &str)] = &[("alex", "Alex Rivera"), ("priya", "Priya Nair")];
+
+fn user_name(id: &str) -> Option<&'static str> {
+    USERS.iter().find(|(user, _)| *user == id).map(|(_, name)| *name)
+}
+
 /// The receipt OnePass leaves on Stellar for one completed request.
 #[derive(Clone, Serialize)]
 struct Receipt {
@@ -52,18 +62,29 @@ struct Receipt {
 }
 
 /// A company's request, from creation to the final outcome.
+/// This is also exactly what the company can see about it.
 #[derive(Clone, Serialize)]
 struct Request {
     id: String,
-    company: company::Company,
+    /// The company asking.
+    requester: String,
+    /// The OnePass ID and name of the person it is about.
+    user: String,
+    user_name: String,
+    /// Why the company wants it. Shown to the person.
+    reason: String,
+    /// The facts asked for, by name.
+    wants: Vec<String>,
     /// "pending"  = waiting for the person to answer
     /// "verified" = shared, and the company accepted it
     /// "rejected" = shared, but the company's checks failed
     /// "refused"  = OnePass itself would not vouch (e.g. untrusted institution)
     /// "denied"   = the person said no
     status: String,
-    /// Why OnePass refused, in words the person can read.
-    reason: Option<String>,
+    /// Why OnePass refused. It can name an institution, so it is shown to the
+    /// person only and never sent to the company (`skip` keeps it out).
+    #[serde(skip)]
+    refusal: Option<String>,
     /// What the company received: facts stamped by OnePass. No institution names.
     delivered: Vec<SignedFact>,
     verdict: Option<company::Verdict>,
@@ -77,10 +98,11 @@ struct AppState {
     registry: registry::Registry,
     /// OnePass's own signing key, used to stamp facts it has verified.
     onepass_key: SigningKey,
-    /// institution id -> access token. This is ALL OnePass keeps about the person's accounts.
-    connections: Mutex<HashMap<String, String>>,
+    /// (person, institution id) -> access token.
+    /// This is ALL OnePass keeps about anyone's accounts.
+    connections: Mutex<HashMap<(String, String), String>>,
     requests: Mutex<HashMap<String, Request>>,
-    /// Request ids in the order they arrived, for the notification panel.
+    /// Request ids in the order they arrived, for the notification list.
     order: Mutex<Vec<String>>,
 }
 
@@ -108,11 +130,30 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
+/// The `?user=alex` part of an address.
+#[derive(Deserialize)]
+struct WhichUser {
+    user: String,
+}
+
+// ─────────────────────────────── Reference lists ───────────────────────────────
+
+/// GET /api/users — the people with a OnePass identity (demo).
+async fn list_users() -> Json<Value> {
+    let users: Vec<Value> = USERS.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
+    Json(json!({ "users": users }))
+}
+
+/// GET /api/catalog — the facts a company can ask for, and the shortcut bundles.
+async fn catalog() -> Json<Value> {
+    Json(json!({ "fields": company::FIELDS, "presets": company::presets() }))
+}
+
 // ───────────────────────── Connecting institutions ─────────────────────────
 
-/// GET /api/sources — every institution, whether the person has connected it,
-/// and whether it is on the registry.
-async fn list_sources(State(state): State<Shared>) -> Result<Json<Value>, ApiError> {
+/// GET /api/sources?user=alex — every institution, whether this person has
+/// connected it, and whether it is on the registry.
+async fn list_sources(State(state): State<Shared>, Query(who): Query<WhichUser>) -> Result<Json<Value>, ApiError> {
     let sources = directory(&state).await?;
     let trusted = state.registry.trusted().await;
     let connections = state.connections.lock().unwrap();
@@ -122,7 +163,8 @@ async fn list_sources(State(state): State<Shared>) -> Result<Json<Value>, ApiErr
             let registered = trusted.as_ref().ok().map(|t| t.iter().any(|x| x.public_key == s.public_key));
             json!({
                 "id": s.id, "name": s.name, "kind": s.kind, "public_key": s.public_key,
-                "fields": s.fields, "connected": connections.contains_key(&s.id),
+                "fields": s.fields,
+                "connected": connections.contains_key(&(who.user.clone(), s.id.clone())),
                 "registered": registered,
             })
         })
@@ -143,65 +185,90 @@ async fn list_sources(State(state): State<Shared>) -> Result<Json<Value>, ApiErr
 
 #[derive(Deserialize)]
 struct Connect {
+    user: String,
     source_id: String,
-    username: String,
     password: String,
 }
 
 /// POST /api/connect — sign in to an institution on the person's behalf.
 /// The password is passed straight through and never saved; only the token is kept.
 async fn connect(State(state): State<Shared>, Json(body): Json<Connect>) -> Result<Json<Value>, ApiError> {
+    if user_name(&body.user).is_none() {
+        return Err(error(StatusCode::NOT_FOUND, "No OnePass user with that ID"));
+    }
     let response = state
         .client
         .post(format!("{SOURCES_URL}/sources/{}/login", body.source_id))
-        .json(&json!({ "username": body.username, "password": body.password }))
+        .json(&json!({ "username": body.user, "password": body.password }))
         .send()
         .await
         .map_err(|_| error(StatusCode::BAD_GATEWAY, "Could not reach the institution"))?;
     if !response.status().is_success() {
-        return Err(error(StatusCode::UNAUTHORIZED, "Wrong username or password"));
+        return Err(error(StatusCode::UNAUTHORIZED, "That institution has no record for you, or the password is wrong"));
     }
     let reply: Value = response.json().await.map_err(|e| error(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let token = reply["token"].as_str().unwrap_or_default().to_string();
-    state.connections.lock().unwrap().insert(body.source_id, token);
+    state.connections.lock().unwrap().insert((body.user, body.source_id), token);
     Ok(Json(json!({ "connected": true })))
 }
 
 #[derive(Deserialize)]
 struct Disconnect {
+    user: String,
     source_id: String,
 }
 
 /// POST /api/disconnect — forget the token, so OnePass can no longer fetch from there.
 async fn disconnect(State(state): State<Shared>, Json(body): Json<Disconnect>) -> Json<Value> {
-    state.connections.lock().unwrap().remove(&body.source_id);
+    state.connections.lock().unwrap().remove(&(body.user, body.source_id));
     Json(json!({ "connected": false }))
 }
 
 // ───────────────────────────── The company's side ─────────────────────────────
 
-/// GET /api/companies — the demo companies and what each asks for.
-async fn list_companies() -> Json<Value> {
-    Json(json!({ "companies": company::companies() }))
-}
-
 #[derive(Deserialize)]
 struct NewRequest {
-    company_id: String,
+    /// The company's name.
+    requester: String,
+    /// OnePass ID of the person it is about.
+    user: String,
+    /// Which facts are wanted.
+    fields: Vec<String>,
+    /// Why, in the company's words.
+    #[serde(default)]
+    reason: String,
 }
 
-/// POST /api/requests — a company asks for facts about the person.
-/// Nothing is fetched yet. The request just waits in the person's notifications.
+/// POST /api/requests — a company asks for facts about a person.
+/// Nothing is fetched yet. The request just waits in that person's notifications.
 async fn create_request(State(state): State<Shared>, Json(body): Json<NewRequest>) -> Result<Json<Value>, ApiError> {
-    let company = company::companies()
-        .into_iter()
-        .find(|c| c.id == body.company_id)
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "No such company"))?;
+    let requester = body.requester.trim().to_string();
+    if requester.is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "Enter your company's name"));
+    }
+    let user = body.user.trim().to_lowercase();
+    let Some(name) = user_name(&user) else {
+        return Err(error(StatusCode::NOT_FOUND, "No OnePass user with that ID"));
+    };
+    // Keep only facts OnePass knows about, in a fixed order, without repeats.
+    let wants: Vec<String> = company::FIELDS
+        .iter()
+        .filter(|f| body.fields.iter().any(|asked| asked == *f))
+        .map(|f| f.to_string())
+        .collect();
+    if wants.is_empty() {
+        return Err(error(StatusCode::BAD_REQUEST, "Choose at least one item to request"));
+    }
+
     let request = Request {
         id: random_id(),
-        company,
+        requester,
+        user,
+        user_name: name.to_string(),
+        reason: body.reason.trim().to_string(),
+        wants,
         status: "pending".into(),
-        reason: None,
+        refusal: None,
         delivered: Vec::new(),
         verdict: None,
         receipt: None,
@@ -227,10 +294,10 @@ async fn get_request(State(state): State<Shared>, Path(id): Path<String>) -> Res
 
 // ───────────────────────────── The person's side ─────────────────────────────
 
-/// GET /api/notifications — the person's requests, newest first.
-/// For each pending one, it lists which connected institutions could supply
-/// each fact, so the person can see and choose the source.
-async fn notifications(State(state): State<Shared>) -> Result<Json<Value>, ApiError> {
+/// GET /api/notifications?user=alex — this person's requests, newest first.
+/// For each pending one, it lists which of their connected institutions could
+/// supply each fact, so they can see and choose the source.
+async fn notifications(State(state): State<Shared>, Query(who): Query<WhichUser>) -> Result<Json<Value>, ApiError> {
     let sources = directory(&state).await?;
     let trusted = state.registry.trusted().await.unwrap_or_default();
     let connections = state.connections.lock().unwrap().clone();
@@ -241,15 +308,18 @@ async fn notifications(State(state): State<Shared>) -> Result<Json<Value>, ApiEr
         .iter()
         .rev()
         .filter_map(|id| requests.get(id))
+        .filter(|r| r.user == who.user)
         .map(|r| {
             let items: Vec<Value> = r
-                .company
                 .wants
                 .iter()
                 .map(|field| {
                     let options: Vec<Value> = sources
                         .iter()
-                        .filter(|s| connections.contains_key(&s.id) && s.fields.iter().any(|f| f == field))
+                        .filter(|s| {
+                            connections.contains_key(&(who.user.clone(), s.id.clone()))
+                                && s.fields.iter().any(|f| f == field)
+                        })
                         .map(|s| {
                             json!({
                                 "id": s.id, "name": s.name,
@@ -261,8 +331,8 @@ async fn notifications(State(state): State<Shared>) -> Result<Json<Value>, ApiEr
                 })
                 .collect();
             json!({
-                "id": r.id, "company": r.company.name, "status": r.status,
-                "reason": r.reason, "items": items,
+                "id": r.id, "requester": r.requester, "reason": r.reason, "status": r.status,
+                "refusal": r.refusal, "wants": r.wants, "items": items,
             })
         })
         .collect();
@@ -281,12 +351,12 @@ struct Approval {
 }
 
 /// Mark a request as refused by OnePass and say why.
-fn refuse(state: &AppState, id: &str, reason: String) -> Result<Json<Request>, ApiError> {
+fn refuse(state: &AppState, id: &str, why: String) -> Result<Json<Value>, ApiError> {
     let mut requests = state.requests.lock().unwrap();
     let request = requests.get_mut(id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
     request.status = "refused".to_string();
-    request.reason = Some(reason);
-    Ok(Json(request.clone()))
+    request.refusal = Some(why);
+    Ok(Json(json!({ "status": request.status })))
 }
 
 /// POST /api/requests/{id}/approve — the person says yes.
@@ -295,14 +365,14 @@ async fn approve(
     State(state): State<Shared>,
     Path(id): Path<String>,
     Json(body): Json<Approval>,
-) -> Result<Json<Request>, ApiError> {
-    let wants = {
+) -> Result<Json<Value>, ApiError> {
+    let (wants, user) = {
         let requests = state.requests.lock().unwrap();
         let request = requests.get(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
         if request.status != "pending" {
             return Err(error(StatusCode::CONFLICT, "This request was already answered"));
         }
-        request.company.wants.clone()
+        (request.wants.clone(), request.user.clone())
     };
 
     let sources = directory(&state).await?;
@@ -310,12 +380,12 @@ async fn approve(
     let connections = state.connections.lock().unwrap().clone();
 
     let mut delivered: Vec<SignedFact> = Vec::new();
-    for field in wants.iter().filter(|f| body.choices.contains_key(**f)) {
-        let source_id = &body.choices[*field];
+    for field in wants.iter().filter(|f| body.choices.contains_key(*f)) {
+        let source_id = &body.choices[field];
         let Some(source) = sources.iter().find(|s| &s.id == source_id) else {
             return refuse(&state, &id, format!("Unknown institution '{source_id}'."));
         };
-        let Some(token) = connections.get(source_id) else {
+        let Some(token) = connections.get(&(user.clone(), source_id.clone())) else {
             return refuse(&state, &id, format!("{} is not connected.", source.name));
         };
 
@@ -372,7 +442,7 @@ async fn approve(
         state.registry.explorer_url(),
     );
 
-    let snapshot = {
+    let status = {
         let mut requests = state.requests.lock().unwrap();
         let request = requests.get_mut(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
         request.status = if verdict.ok { "verified" } else { "rejected" }.to_string();
@@ -383,7 +453,7 @@ async fn approve(
             status: "pending".to_string(),
             detail: None,
         });
-        request.clone()
+        request.status.clone()
     };
 
     // Step 7: write the receipt to Stellar in the background (it takes a few
@@ -403,27 +473,30 @@ async fn approve(
         }
     });
 
-    Ok(Json(snapshot))
+    Ok(Json(json!({ "status": status })))
 }
 
 /// POST /api/requests/{id}/deny — the person says no. Nothing is fetched or shared.
-async fn deny(State(state): State<Shared>, Path(id): Path<String>) -> Result<Json<Request>, ApiError> {
+async fn deny(State(state): State<Shared>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let mut requests = state.requests.lock().unwrap();
     let request = requests.get_mut(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
     if request.status == "pending" {
         request.status = "denied".to_string();
     }
-    Ok(Json(request.clone()))
+    Ok(Json(json!({ "status": request.status })))
 }
 
 // ───────────────────────────────── Web pages ─────────────────────────────────
 // The pages are plain HTML files in server/static, baked into the program.
 
-async fn home_page() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+async fn landing_page() -> Html<&'static str> {
+    Html(include_str!("../static/landing.html"))
 }
-async fn company_page() -> Html<&'static str> {
-    Html(include_str!("../static/company.html"))
+async fn user_page() -> Html<&'static str> {
+    Html(include_str!("../static/app.html"))
+}
+async fn requester_page() -> Html<&'static str> {
+    Html(include_str!("../static/request.html"))
 }
 async fn style() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css")], include_str!("../static/style.css"))
@@ -445,14 +518,16 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/", get(home_page))
-        .route("/company/{id}", get(company_page))
+        .route("/", get(landing_page))
+        .route("/app", get(user_page))
+        .route("/request", get(requester_page))
         .route("/style.css", get(style))
         .route("/app.js", get(script))
+        .route("/api/users", get(list_users))
+        .route("/api/catalog", get(catalog))
         .route("/api/sources", get(list_sources))
         .route("/api/connect", post(connect))
         .route("/api/disconnect", post(disconnect))
-        .route("/api/companies", get(list_companies))
         .route("/api/requests", post(create_request))
         .route("/api/requests/{id}", get(get_request))
         .route("/api/requests/{id}/approve", post(approve))

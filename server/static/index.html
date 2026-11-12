@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OnePass</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <a class="brand" href="/">OnePass</a>
+    <span class="who">Signed in as Alex Rivera (demo)</span>
+  </header>
+  <main>
+    <h1>Your identity</h1>
+    <p class="sub">One identity. Every door. Connect the places that already know you; OnePass stores no copy of your information.</p>
+
+    <h2>Connected institutions</h2>
+    <div id="sources"><p class="sub">Loading…</p></div>
+
+    <h2>Try it with a company</h2>
+    <div id="companies" class="grid"></div>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    async function loadSources() {
+      const box = document.getElementById("sources");
+      let data;
+      try { data = await api("/api/sources"); }
+      catch (e) { box.replaceChildren(el("p", { class: "error" }, e.message)); return; }
+
+      box.replaceChildren(...data.sources.map((s) => {
+        const error = el("p", { class: "error" });
+        const card = el("div", { class: "card" },
+          el("div", { class: "split" },
+            el("div", {},
+              el("h3", {}, s.name, " ", s.connected ? el("span", { class: "tag ok" }, "Connected") : el("span", { class: "tag" }, s.kind)),
+              el("div", { class: "meta" }, "Can provide: " + s.fields.map(label).join(", "))),
+            s.connected && el("button", { class: "secondary", onclick: async () => {
+              await api("/api/disconnect", { source_id: s.id }); loadSources();
+            } }, "Disconnect")));
+
+        if (!s.connected) {
+          const user = el("input", { type: "text", placeholder: "Username", value: "alex", "aria-label": "Username for " + s.name });
+          const pass = el("input", { type: "password", placeholder: "Password", value: "demo", "aria-label": "Password for " + s.name });
+          card.append(el("form", { class: "login", onsubmit: async (event) => {
+            event.preventDefault();
+            try {
+              await api("/api/connect", { source_id: s.id, username: user.value, password: pass.value });
+              loadSources();
+            } catch (e) { error.textContent = e.message; }
+          } }, user, pass, el("button", { type: "submit" }, "Sign in with " + s.name)), error);
+        }
+        return card;
+      }));
+    }
+
+    async function loadCompanies() {
+      const data = await api("/api/companies");
+      document.getElementById("companies").replaceChildren(...data.companies.map((c) =>
+        el("div", { class: "card" },
+          el("h3", {}, c.name),
+          el("p", { class: "meta" }, c.tagline),
+          el("p", { class: "meta" }, "Asks for: " + c.wants.map((w) => label(w.field)).join(", ")),
+          el("a", { class: "button", href: "/company/" + c.id }, "Visit " + c.name))));
+    }
+
+    loadSources();
+    loadCompanies();
+  </script>
+</body>
+</html>

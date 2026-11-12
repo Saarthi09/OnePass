@@ -5,12 +5,9 @@ edition = "2021"
 description = "Stand-in institutions (a university, a bank, a housing agency) for the OnePass demo"
 
 [dependencies]
+onepass-core = { path = "../core" }                 # signing code shared with the server
 axum = "0.8"                                        # web server
 tokio = { version = "1", features = ["full"] }      # lets the server handle many requests at once
 serde = { version = "1", features = ["derive"] }    # turns Rust structs into JSON and back
 serde_json = "1"
-ed25519-dalek = "2"                                 # digital signatures (same kind Stellar uses)
-stellar-strkey = "0.0.13"                           # writes public keys in Stellar's "G..." format
-sha2 = "0.10"                                       # hashing
-base64 = "0.22"
 rand = "0.8"

@@ -1,0 +1,15 @@
+[package]
+name = "onepass-server"
+version = "0.1.0"
+edition = "2021"
+description = "OnePass: connects a user's institutions and shares approved facts with companies"
+
+[dependencies]
+onepass-core = { path = "../core" }                 # checking signatures
+axum = "0.8"                                        # web server
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+# Lets this server call the institutions' servers.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

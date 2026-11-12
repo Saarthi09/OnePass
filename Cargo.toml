@@ -1,0 +1,5 @@
+# The whole OnePass project is one Cargo "workspace": a folder of related Rust
+# programs that share dependencies. Each piece of OnePass gets its own member.
+[workspace]
+resolver = "2"
+members = ["sources"]

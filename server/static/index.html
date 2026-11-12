@@ -17,6 +17,7 @@
 
     <h2>Connected institutions</h2>
     <div id="sources"><p class="sub">Loading…</p></div>
+    <p class="meta" id="registry"></p>
 
     <h2>Try it with a company</h2>
     <div id="companies" class="grid"></div>
@@ -30,12 +31,19 @@
       try { data = await api("/api/sources"); }
       catch (e) { box.replaceChildren(el("p", { class: "error" }, e.message)); return; }
 
+      const note = document.getElementById("registry");
+      note.replaceChildren("Trusted-institution registry: ",
+        data.registry_url ? el("a", { href: data.registry_url, target: "_blank", rel: "noreferrer" }, data.registry) : data.registry);
+      if (data.registry_error) note.append(el("div", { class: "error" }, data.registry_error));
+
       box.replaceChildren(...data.sources.map((s) => {
         const error = el("p", { class: "error" });
         const card = el("div", { class: "card" },
           el("div", { class: "split" },
             el("div", {},
-              el("h3", {}, s.name, " ", s.connected ? el("span", { class: "tag ok" }, "Connected") : el("span", { class: "tag" }, s.kind)),
+              el("h3", {}, s.name, " ", s.connected ? el("span", { class: "tag ok" }, "Connected") : el("span", { class: "tag" }, s.kind), " ",
+                s.registered === true && el("span", { class: "tag ok" }, "On the registry"),
+                s.registered === false && el("span", { class: "tag bad" }, "Not on the registry")),
               el("div", { class: "meta" }, "Can provide: " + s.fields.map(label).join(", "))),
             s.connected && el("button", { class: "secondary", onclick: async () => {
               await api("/api/disconnect", { source_id: s.id }); loadSources();

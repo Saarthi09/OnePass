@@ -39,7 +39,8 @@
                 tick(check.signature_ok), check.signature_ok ? " Signature genuine" : " Signature does not match (altered)", "  ·  ",
                 tick(check.source_trusted), check.source_trusted ? " Signed by " + check.source_name : " Signer not on the registry",
                 check.source_trusted && !check.right_kind ? "  ·  ✗ Wrong kind of institution" : ""))))),
-        el("p", { class: "meta" }, "Registry used: " + v.registry),
+        el("p", { class: "meta" }, "Registry checked: ",
+          v.registry_url ? el("a", { href: v.registry_url, target: "_blank", rel: "noreferrer" }, v.registry) : v.registry),
       ];
     }
 

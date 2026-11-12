@@ -30,8 +30,32 @@ Then open http://127.0.0.1:4000 in a browser.
 4. Repeat either one and tick **"Demo: alter a fact in transit"**. The company rejects it,
    because the signature no longer matches.
 5. Repeat and untick a fact, or press **Deny**: the company gets only what was approved.
+6. **The impostor:** disconnect Northfield University, connect **Diploma Express**, and ask
+   for the student discount again. Its signature is valid, but its key is not on the Stellar
+   registry, so the shop rejects it. This is what the blockchain is for.
 
 `cargo test` runs the signature checks.
+
+## The Stellar registry
+
+Which institutions can be trusted? That list is a **smart contract on Stellar**
+(`contracts/registry`, written in Rust):
+
+- anyone can read it, so a company can check a signer without asking OnePass;
+- only the admin key can change it, and every change is a public, permanent transaction;
+- it holds institution keys and names only. **No personal information goes on the blockchain.**
+
+Put it on the Stellar testnet (one time):
+
+```bash
+brew install stellar-cli          # or: cargo install --locked stellar-cli
+bash scripts/setup-stellar.sh
+```
+
+The script deploys the contract, registers the three genuine institutions, and writes the
+contract id to `stellar-registry.txt`. Restart the OnePass server and it reads the list from
+Stellar; the pages link to the contract on a public block explorer. Without that file the
+server falls back to a local copy of the list and says so on screen.
 
 ## The pieces
 
@@ -41,7 +65,9 @@ Then open http://127.0.0.1:4000 in a browser.
 | `sources/` | Stand-in institutions (port 4001). **All names and records are invented.** |
 | `server/` | OnePass itself (port 4000): connect accounts, fetch facts, user approval. Also serves the two invented company pages. |
 | `server/src/company.rs` | The checks a company runs on what it receives. |
-| `server/src/registry.rs` | The list of trusted institutions. Currently a local placeholder; the Stellar registry replaces it. |
+| `server/src/registry.rs` | Reads the list of trusted institutions from the Stellar contract. |
+| `contracts/registry/` | The smart contract that holds that list on Stellar. |
+| `scripts/setup-stellar.sh` | Deploys the contract to the Stellar testnet. |
 
 ### Stand-in institutions
 
@@ -50,6 +76,7 @@ Then open http://127.0.0.1:4000 in a browser.
 | Northfield University | university | name, student ID, student status, program, enrolment year |
 | Maple Trust Bank | bank | name, date of birth, over 18, address, customer since |
 | CityHome Housing | housing | name, address, tenant status, tenancy start |
+| Diploma Express | "university" | An impostor: signs facts but is not on the registry |
 
 Each institution signs every fact it hands out with its own key, so nobody can alter
 a fact afterwards or pretend it came from somewhere else. OnePass keeps only an access
@@ -57,5 +84,6 @@ token for each connected institution, never a copy of the data.
 
 ## Still to build
 
-- Stellar registry listing the institutions' public keys (replaces the local placeholder)
+- Shared control of the registry (several organisations approving changes, not one admin)
+- Real institution integrations
 - Phone-style approval screen

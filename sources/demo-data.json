@@ -1,5 +1,5 @@
 {
-  "_note": "Everything in this file is invented for demonstration. None of these institutions or people exist.",
+  "_note": "Everything in this file is invented for demonstration. None of these institutions or people exist. 'Diploma Express' plays an impostor: it signs facts, but it is not on the Stellar registry, so companies reject it.",
   "institutions": [
     {
       "id": "northfield-university",
@@ -67,6 +67,23 @@
             "address": "12 Example Street, Unit 4, Northfield",
             "is_tenant": true,
             "tenancy_start": "2026-09-01"
+          }
+        }
+      }
+    },
+    {
+      "id": "diploma-express",
+      "name": "Diploma Express",
+      "kind": "university",
+      "records": {
+        "alex": {
+          "password": "demo",
+          "fields": {
+            "full_name": "Alex Rivera",
+            "student_id": "DX-000001",
+            "is_student": true,
+            "program": "Instant Degree",
+            "enrolment_year": 2026
           }
         }
       }

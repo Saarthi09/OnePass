@@ -70,7 +70,9 @@ pub struct FactCheck {
 #[derive(Clone, Serialize)]
 pub struct Verdict {
     pub ok: bool,
-    pub registry: &'static str,
+    /// Which registry the company consulted, and a link to inspect it.
+    pub registry: String,
+    pub registry_url: Option<String>,
     pub checks: Vec<FactCheck>,
 }
 
@@ -79,7 +81,8 @@ pub fn verify(
     wants: &[Want],
     shared: &[SignedFact],
     trusted: &[TrustedSource],
-    registry: &'static str,
+    registry: String,
+    registry_url: Option<String>,
 ) -> Verdict {
     let checks: Vec<FactCheck> = wants
         .iter()
@@ -113,5 +116,5 @@ pub fn verify(
         })
         .collect();
 
-    Verdict { ok: checks.iter().all(|c| c.ok), registry, checks }
+    Verdict { ok: checks.iter().all(|c| c.ok), registry, registry_url, checks }
 }

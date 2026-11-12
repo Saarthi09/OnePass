@@ -6,4 +6,16 @@ members = [
     "core",     # signing and checking facts (shared by the other two)
     "sources",  # stand-in institutions: university, bank, housing agency
     "server",   # OnePass itself, plus the demo company pages
+    "contracts/registry",  # smart contract on Stellar: the list of trusted institutions
 ]
+
+# Settings Stellar recommends for building small, safe smart contracts.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

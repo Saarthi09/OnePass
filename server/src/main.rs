@@ -10,6 +10,7 @@
 //! Everything is kept in memory, so restarting the server resets the demo.
 
 mod company;
+mod directory;
 mod registry;
 
 use axum::{
@@ -21,7 +22,7 @@ use axum::{
 };
 use onepass_core::SignedFact;
 use rand::RngCore;
-use registry::TrustedSource;
+use directory::SourceInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -58,6 +59,8 @@ struct Request {
 /// Everything the server remembers while it runs.
 struct AppState {
     client: reqwest::Client,
+    /// The list of trusted institutions (on Stellar, or a local fallback).
+    registry: registry::Registry,
     /// institution id -> access token. This is ALL OnePass stores about the user's accounts.
     connections: Mutex<HashMap<String, String>>,
     requests: Mutex<HashMap<String, Request>>,
@@ -70,8 +73,9 @@ fn error(status: StatusCode, message: impl Into<String>) -> ApiError {
     (status, Json(json!({ "error": message.into() })))
 }
 
-async fn trusted_sources(state: &AppState) -> Result<Vec<TrustedSource>, ApiError> {
-    registry::load(&state.client, SOURCES_URL)
+/// Which institutions exist and what each can provide (not a source of trust).
+async fn directory(state: &AppState) -> Result<Vec<SourceInfo>, ApiError> {
+    directory::load(&state.client, SOURCES_URL)
         .await
         .map_err(|e| error(StatusCode::BAD_GATEWAY, e))
 }
@@ -86,18 +90,27 @@ fn random_id() -> String {
 
 /// GET /api/sources — every institution, and whether the user has connected it.
 async fn list_sources(State(state): State<Shared>) -> Result<Json<Value>, ApiError> {
-    let sources = trusted_sources(&state).await?;
+    let sources = directory(&state).await?;
+    // Check each institution against the registry, so the page can show who is trusted.
+    let trusted = state.registry.trusted().await;
     let connections = state.connections.lock().unwrap();
     let list: Vec<Value> = sources
         .iter()
         .map(|s| {
+            let registered = trusted.as_ref().ok().map(|t| t.iter().any(|x| x.public_key == s.public_key));
             json!({
                 "id": s.id, "name": s.name, "kind": s.kind, "public_key": s.public_key,
                 "fields": s.fields, "connected": connections.contains_key(&s.id),
+                "registered": registered,
             })
         })
         .collect();
-    Ok(Json(json!({ "sources": list })))
+    Ok(Json(json!({
+        "sources": list,
+        "registry": state.registry.describe(),
+        "registry_url": state.registry.explorer_url(),
+        "registry_error": trusted.err(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -157,7 +170,7 @@ async fn create_request(State(state): State<Shared>, Json(body): Json<NewRequest
         .into_iter()
         .find(|c| c.id == body.company_id)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "No such company"))?;
-    let sources = trusted_sources(&state).await?;
+    let sources = directory(&state).await?;
     // Copy the tokens out so the lock is released before we make network calls.
     let connections = state.connections.lock().unwrap().clone();
 
@@ -228,7 +241,8 @@ async fn approve(
     Path(id): Path<String>,
     Json(body): Json<Approval>,
 ) -> Result<Json<Request>, ApiError> {
-    let trusted = trusted_sources(&state).await?;
+    // The company looks up the trusted list on the registry (Stellar).
+    let trusted = state.registry.trusted().await.map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
     let mut requests = state.requests.lock().unwrap();
     let request = requests.get_mut(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
     if request.status != "pending" {
@@ -251,7 +265,13 @@ async fn approve(
         }
     }
 
-    let verdict = company::verify(&request.company.wants, &shared, &trusted, registry::REGISTRY_NAME);
+    let verdict = company::verify(
+        &request.company.wants,
+        &shared,
+        &trusted,
+        state.registry.describe(),
+        state.registry.explorer_url(),
+    );
     request.status = if verdict.ok { "verified" } else { "rejected" }.to_string();
     request.verdict = Some(verdict);
     Ok(Json(request.clone()))
@@ -290,9 +310,12 @@ async fn script() -> impl IntoResponse {
 async fn main() {
     let state: Shared = Arc::new(AppState {
         client: reqwest::Client::new(),
+        registry: registry::Registry::detect(),
         connections: Mutex::new(HashMap::new()),
         requests: Mutex::new(HashMap::new()),
     });
+
+    let state_info = state.registry.describe();
 
     let app = Router::new()
         .route("/", get(home_page))
@@ -313,6 +336,7 @@ async fn main() {
     let address = "127.0.0.1:4000";
     let listener = tokio::net::TcpListener::bind(address).await.expect("port 4000 is already in use");
     println!("OnePass is running. Open http://{address} in your browser.");
+    println!("Trusted-institution registry: {}", state_info);
     println!("(The stand-in institutions must also be running: cargo run -p onepass-sources)");
     axum::serve(listener, app).await.unwrap();
 }

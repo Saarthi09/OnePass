@@ -8,12 +8,42 @@ something (a name, an address, proof of being a student), OnePass fetches just
 that from the original source, the person approves it, and the company can check
 it is genuine using a registry on the Stellar blockchain.
 
-## What is built so far
+## How to run the demo
 
-### `sources/` — stand-in institutions
+You need two terminals, both inside the project folder.
 
-OnePass cannot connect to real institutions for this project, so three invented
-ones play their part. **All names and records are fictional.**
+```bash
+# Terminal 1: the stand-in institutions
+cargo run -p onepass-sources
+
+# Terminal 2: OnePass and the demo company pages
+cargo run -p onepass-server
+```
+
+Then open http://127.0.0.1:4000 in a browser.
+
+1. **Connect** Northfield University and Maple Trust Bank (login `alex` / `demo`).
+2. **Visit Stride Sportswear** and ask for the student discount. Approve the request.
+   The shop receives one fact, "current student", and checks the university's signature.
+3. **Visit Brightline Mobile** and sign up. Approve the request. The company receives
+   name, address and date of birth, each signed by the bank. No form was filled in.
+4. Repeat either one and tick **"Demo: alter a fact in transit"**. The company rejects it,
+   because the signature no longer matches.
+5. Repeat and untick a fact, or press **Deny**: the company gets only what was approved.
+
+`cargo test` runs the signature checks.
+
+## The pieces
+
+| Folder | What it is |
+| --- | --- |
+| `core/` | Signing and checking facts. Shared by the other two. |
+| `sources/` | Stand-in institutions (port 4001). **All names and records are invented.** |
+| `server/` | OnePass itself (port 4000): connect accounts, fetch facts, user approval. Also serves the two invented company pages. |
+| `server/src/company.rs` | The checks a company runs on what it receives. |
+| `server/src/registry.rs` | The list of trusted institutions. Currently a local placeholder; the Stellar registry replaces it. |
+
+### Stand-in institutions
 
 | Institution | Kind | Facts it can provide |
 | --- | --- | --- |
@@ -21,30 +51,11 @@ ones play their part. **All names and records are fictional.**
 | Maple Trust Bank | bank | name, date of birth, over 18, address, customer since |
 | CityHome Housing | housing | name, address, tenant status, tenancy start |
 
-Demo logins: `alex` / `demo` and `priya` / `demo`.
-
-Each institution signs every fact it hands out with its own key, so nobody can
-alter a fact afterwards or pretend it came from somewhere else.
-
-```bash
-cargo run -p onepass-sources     # starts on http://127.0.0.1:4001
-cargo test                       # checks that tampered facts are rejected
-```
-
-Try it:
-
-```bash
-# 1. Sign in to the bank (returns a token)
-curl -X POST http://127.0.0.1:4001/sources/maple-trust-bank/login \
-  -H 'content-type: application/json' -d '{"username":"alex","password":"demo"}'
-
-# 2. Ask for signed facts, using that token
-curl 'http://127.0.0.1:4001/sources/maple-trust-bank/facts?fields=full_name,address' \
-  -H 'Authorization: Bearer <token>'
-```
+Each institution signs every fact it hands out with its own key, so nobody can alter
+a fact afterwards or pretend it came from somewhere else. OnePass keeps only an access
+token for each connected institution, never a copy of the data.
 
 ## Still to build
 
-- Stellar registry listing the institutions' public keys
-- OnePass server: connect accounts, handle company requests, user approval
-- Demo company site and the web pages
+- Stellar registry listing the institutions' public keys (replaces the local placeholder)
+- Phone-style approval screen

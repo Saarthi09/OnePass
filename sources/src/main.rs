@@ -10,7 +10,8 @@
 //!   GET  /sources/{id}/facts?fields= hand out signed facts about the signed-in person
 
 mod data;
-mod signing;
+
+use onepass_core as signing;
 
 use axum::{
     extract::{Path, Query, State},

@@ -10,6 +10,8 @@
   <header>
     <a class="brand" href="/">OnePass</a>
     <span class="who">Signed in as Alex Rivera (demo)</span>
+    <button class="bell" id="bell" aria-label="Notifications" aria-expanded="false">Notifications</button>
+    <div id="panel" hidden></div>
   </header>
   <main>
     <h1>Your identity</h1>
@@ -17,28 +19,41 @@
 
     <h2>Connected institutions</h2>
     <div id="sources"><p class="sub">Loading…</p></div>
+    <p class="meta" id="registry"></p>
 
-    <h2>Try it with a company</h2>
+    <h2>Companies that can ask for your information</h2>
+    <p class="sub">Open one in a new tab and make a request. It will arrive in your notifications here.</p>
     <div id="companies" class="grid"></div>
   </main>
 
   <script src="/app.js"></script>
   <script>
+    // ───────────── Connected institutions ─────────────
     async function loadSources() {
       const box = document.getElementById("sources");
       let data;
       try { data = await api("/api/sources"); }
-      catch (e) { box.replaceChildren(el("p", { class: "error" }, e.message)); return; }
+      catch (e) { fill(box, el("p", { class: "error" }, e.message)); return; }
 
-      box.replaceChildren(...data.sources.map((s) => {
+      const note = document.getElementById("registry");
+      fill(note, "Trusted-institution registry: ",
+        data.registry_url ? el("a", { href: data.registry_url, target: "_blank", rel: "noreferrer" }, data.registry) : data.registry,
+        el("br"), "OnePass's own signing key: ", el("code", {}, data.onepass_key), " ",
+        data.onepass_registered === true && el("span", { class: "tag ok" }, "On the registry"),
+        data.onepass_registered === false && el("span", { class: "tag bad" }, "Not on the registry"));
+      if (data.registry_error) note.append(el("div", { class: "error" }, data.registry_error));
+
+      fill(box, data.sources.map((s) => {
         const error = el("p", { class: "error" });
         const card = el("div", { class: "card" },
           el("div", { class: "split" },
             el("div", {},
-              el("h3", {}, s.name, " ", s.connected ? el("span", { class: "tag ok" }, "Connected") : el("span", { class: "tag" }, s.kind)),
+              el("h3", {}, s.name, " ", s.connected ? el("span", { class: "tag ok" }, "Connected") : el("span", { class: "tag" }, s.kind), " ",
+                s.registered === true && el("span", { class: "tag ok" }, "On the registry"),
+                s.registered === false && el("span", { class: "tag bad" }, "Not on the registry")),
               el("div", { class: "meta" }, "Can provide: " + s.fields.map(label).join(", "))),
             s.connected && el("button", { class: "secondary", onclick: async () => {
-              await api("/api/disconnect", { source_id: s.id }); loadSources();
+              await api("/api/disconnect", { source_id: s.id }); loadSources(); lastSeen = ""; poll();
             } }, "Disconnect")));
 
         if (!s.connected) {
@@ -48,7 +63,7 @@
             event.preventDefault();
             try {
               await api("/api/connect", { source_id: s.id, username: user.value, password: pass.value });
-              loadSources();
+              loadSources(); lastSeen = ""; poll();
             } catch (e) { error.textContent = e.message; }
           } }, user, pass, el("button", { type: "submit" }, "Sign in with " + s.name)), error);
         }
@@ -62,12 +77,97 @@
         el("div", { class: "card" },
           el("h3", {}, c.name),
           el("p", { class: "meta" }, c.tagline),
-          el("p", { class: "meta" }, "Asks for: " + c.wants.map((w) => label(w.field)).join(", ")),
-          el("a", { class: "button", href: "/company/" + c.id }, "Visit " + c.name))));
+          el("p", { class: "meta" }, "Asks for: " + c.wants.map(label).join(", ")),
+          el("a", { class: "button", href: "/company/" + c.id, target: "_blank" }, "Open " + c.name))));
+    }
+
+    // ───────────── Notification panel ─────────────
+    const bell = document.getElementById("bell");
+    const panel = document.getElementById("panel");
+    let lastSeen = "";       // what the panel currently shows, to avoid redrawing while you are choosing
+    let lastPending = 0;
+
+    function openPanel(open) {
+      panel.hidden = !open;
+      bell.setAttribute("aria-expanded", String(open));
+    }
+    bell.addEventListener("click", () => openPanel(panel.hidden));
+
+    const OUTCOMES = {
+      verified: ["Shared. The company accepted it.", "ok"],
+      rejected: ["Shared, but the company's checks failed.", "bad"],
+      denied: ["You denied this. Nothing was fetched or shared.", ""],
+      refused: ["OnePass refused to vouch for this.", "bad"],
+    };
+
+    // One pending request: what is asked, where each item would come from, approve or deny.
+    function pendingCard(n) {
+      const error = el("p", { class: "error" });
+      const tamper = el("input", { type: "checkbox", id: "tamper-" + n.id });
+      const rows = n.items.map((item) => {
+        const box = el("input", { type: "checkbox", id: n.id + "-" + item.field });
+        if (item.options.length === 0) {
+          box.disabled = true;
+          return { item, box, row: el("div", { class: "item" }, box,
+            el("label", { class: "grow", for: box.id }, label(item.field)),
+            el("span", { class: "meta bad" }, "No connected institution has this")) };
+        }
+        box.checked = true;
+        const select = el("select", { "aria-label": "Source for " + label(item.field) },
+          item.options.map((o) => el("option", { value: o.id }, "from " + o.name + (o.registered ? "" : " (not on registry)"))));
+        return { item, box, select, row: el("div", { class: "item" }, box,
+          el("label", { class: "grow", for: box.id }, label(item.field)), select) };
+      });
+
+      async function answer(path, body) {
+        try { await api("/api/requests/" + n.id + path, body); }
+        catch (e) { error.textContent = e.message; return; }
+        lastSeen = ""; poll();
+      }
+
+      return el("div", { class: "notif" },
+        el("div", { class: "title" }, n.company + " is asking for your information"),
+        el("div", { class: "meta" }, "Untick anything you do not want to share, and choose where each item comes from. The company is not told the source."),
+        rows.map((r) => r.row),
+        error,
+        el("div", { class: "actions" },
+          el("button", { onclick: () => {
+            const choices = {};
+            for (const r of rows) if (r.box.checked && r.select) choices[r.item.field] = r.select.value;
+            answer("/approve", { choices, tamper: tamper.checked });
+          } }, "Approve"),
+          el("button", { class: "danger", onclick: () => answer("/deny", {}) }, "Deny"),
+          el("label", { class: "tamper", for: tamper.id }, tamper, "Demo: alter a fact in transit")));
+    }
+
+    function answeredCard(n) {
+      const [text, tone] = OUTCOMES[n.status] || [n.status, ""];
+      return el("div", { class: "notif" },
+        el("div", { class: "title" }, n.company),
+        el("div", { class: "meta " + tone }, text + (n.reason ? " " + n.reason : "")));
+    }
+
+    async function poll() {
+      let data;
+      try { data = await api("/api/notifications"); } catch { return; }
+
+      fill(bell, "Notifications", data.pending > 0 && el("span", { class: "count" }, data.pending));
+      if (data.pending > lastPending) openPanel(true);   // a new request just arrived
+      lastPending = data.pending;
+
+      const seen = JSON.stringify(data.notifications);
+      if (seen === lastSeen) return;
+      lastSeen = seen;
+      fill(panel, 
+        el("h3", {}, "Notifications"),
+        data.notifications.length === 0 && el("p", { class: "meta" }, "No requests yet. When a company asks for your information, it appears here."),
+        data.notifications.map((n) => (n.status === "pending" ? pendingCard(n) : answeredCard(n))));
     }
 
     loadSources();
     loadCompanies();
+    poll();
+    setInterval(poll, 2000);
   </script>
 </body>
 </html>

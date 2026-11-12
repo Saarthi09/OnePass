@@ -9,7 +9,8 @@
 //! "G") so the same key can be listed in the Stellar registry later.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+pub use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -110,4 +111,18 @@ mod tests {
         fact.source_key = stellar_address(&university.verifying_key());
         assert!(!verify_fact(&fact));
     }
+}
+
+/// A fingerprint (SHA-256 hash) of a set of signed facts, as 64 hex characters.
+///
+/// It is built from the signatures only, so it reveals nothing about the facts
+/// themselves, yet anyone holding the same facts can recompute it and get the
+/// same answer. This is what OnePass records on Stellar as a receipt.
+pub fn fingerprint(facts: &[SignedFact]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"onepass-receipt-v1");
+    for fact in facts {
+        hasher.update(fact.signature.as_bytes());
+    }
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }

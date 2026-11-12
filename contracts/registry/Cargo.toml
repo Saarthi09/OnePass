@@ -1,0 +1,16 @@
+[package]
+name = "onepass-registry"
+version = "0.1.0"
+edition = "2021"
+description = "Stellar smart contract: the public list of institutions OnePass trusts"
+
+[lib]
+# "cdylib" makes a WebAssembly file that can be uploaded to Stellar.
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = "27.0.6"
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }

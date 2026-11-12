@@ -1,40 +1,155 @@
 //! The registry of trusted institutions.
 //!
-//! This answers one question: "which public keys belong to genuine institutions?"
+//! This answers two questions:
+//!   * "which signing keys belong to genuine institutions?" (OnePass asks this
+//!     before vouching for a fact)
+//!   * "which key is OnePass's own?" (companies ask this before accepting
+//!     OnePass's stamp)
+//! It is also where OnePass records a receipt for every verification.
 //!
-//! RIGHT NOW it is a placeholder that simply asks the stand-in institutions for
-//! their keys. That is circular (an impostor could vouch for itself), so the
-//! next step is to replace `load` with a lookup on the Stellar blockchain,
-//! where the list is public and cannot be quietly edited. Nothing else in the
-//! project needs to change when that happens.
+//! STELLAR MODE (the real thing): the list lives in a smart contract on the
+//! Stellar testnet (see contracts/registry). This file asks the contract for
+//! the list by running Stellar's command-line tool:
+//!
+//!     stellar contract invoke --id <contract> ... -- list
+//!
+//! Reading is free and changes nothing on the blockchain. Stellar mode is
+//! switched on by the file `stellar-registry.txt`, which `scripts/setup-stellar.sh`
+//! creates when it deploys the contract.
+//!
+//! LOCAL MODE (fallback): if that file is missing, a copy of the list written
+//! in this file is used instead, and the pages say so.
 
 use serde::{Deserialize, Serialize};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
-pub const REGISTRY_NAME: &str = "local demo list (Stellar registry coming next)";
+/// File holding the deployed contract's id. Created by scripts/setup-stellar.sh.
+const CONTRACT_FILE: &str = "stellar-registry.txt";
+/// The Stellar CLI identity used to ask the question (reading needs no special rights).
+const STELLAR_IDENTITY: &str = "onepass-admin";
+/// How long an answer is reused before asking the blockchain again.
+const CACHE_FOR: Duration = Duration::from_secs(20);
 
-/// One institution on the registry.
+/// OnePass's own public key in the demo (the server checks this on startup).
+pub const ONEPASS_KEY: &str = "GCYK7UIOCLXXHFAJSIPZ56TC5LPDLIFL25R6TK3W2ZSIGRYG4DZBF4ME";
+
+/// One entry on the registry.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrustedSource {
-    pub id: String,
+    pub public_key: String,
     pub name: String,
     pub kind: String,
-    pub public_key: String,
-    /// Which facts this institution can provide.
-    pub fields: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct SourceList {
-    sources: Vec<TrustedSource>,
+pub struct Registry {
+    /// Some(id) = Stellar mode, None = local mode.
+    contract_id: Option<String>,
+    cache: Mutex<Option<(Instant, Vec<TrustedSource>)>>,
 }
 
-/// Fetch the current list of trusted institutions.
-pub async fn load(client: &reqwest::Client, sources_url: &str) -> Result<Vec<TrustedSource>, String> {
-    let response = client
-        .get(format!("{sources_url}/sources"))
-        .send()
-        .await
-        .map_err(|_| "The stand-in institutions are not running. Start them with: cargo run -p onepass-sources".to_string())?;
-    let list: SourceList = response.json().await.map_err(|e| e.to_string())?;
-    Ok(list.sources)
+impl Registry {
+    /// Decide which mode to run in, by looking for the contract-id file.
+    pub fn detect() -> Registry {
+        let contract_id = std::fs::read_to_string(CONTRACT_FILE)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|id| !id.is_empty());
+        Registry { contract_id, cache: Mutex::new(None) }
+    }
+
+    /// A human-readable description, shown on the result page.
+    pub fn describe(&self) -> String {
+        match &self.contract_id {
+            Some(id) => format!("Stellar testnet smart contract {id}"),
+            None => "local copy (Stellar not set up yet: run scripts/setup-stellar.sh)".to_string(),
+        }
+    }
+
+    /// A link where anyone can inspect the contract and its history.
+    pub fn explorer_url(&self) -> Option<String> {
+        self.contract_id
+            .as_ref()
+            .map(|id| format!("https://stellar.expert/explorer/testnet/contract/{id}"))
+    }
+
+    /// The current list of trusted institutions.
+    pub async fn trusted(&self) -> Result<Vec<TrustedSource>, String> {
+        let Some(contract_id) = &self.contract_id else {
+            return Ok(local_list());
+        };
+
+        // Reuse a recent answer if we have one.
+        if let Some((when, list)) = &*self.cache.lock().unwrap() {
+            if when.elapsed() < CACHE_FOR {
+                return Ok(list.clone());
+            }
+        }
+
+        let output = tokio::process::Command::new("stellar")
+            .args(["contract", "invoke", "--id", contract_id])
+            .args(["--source-account", STELLAR_IDENTITY, "--network", "testnet"])
+            .args(["--", "list"])
+            .output()
+            .await
+            .map_err(|e| format!("Could not run the Stellar CLI (is it installed?): {e}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "The Stellar registry lookup failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        // The contract's answer is printed as JSON, e.g.
+        // [{"kind":"bank","name":"Maple Trust Bank","public_key":"GA4K..."}]
+        let text = String::from_utf8_lossy(&output.stdout);
+        let list: Vec<TrustedSource> = serde_json::from_str(text.trim())
+            .map_err(|e| format!("Could not read the registry's answer ({e}): {}", text.trim()))?;
+
+        *self.cache.lock().unwrap() = Some((Instant::now(), list.clone()));
+        Ok(list)
+    }
+}
+
+impl Registry {
+    /// Record the fingerprint of one verification on Stellar.
+    /// This is a real blockchain transaction, so it takes a few seconds.
+    pub async fn record_receipt(&self, fingerprint: &str) -> Result<(), String> {
+        let Some(contract_id) = &self.contract_id else {
+            return Err("Stellar is not set up, so no receipt was recorded".to_string());
+        };
+        let output = tokio::process::Command::new("stellar")
+            .args(["contract", "invoke", "--id", contract_id])
+            .args(["--source-account", STELLAR_IDENTITY, "--network", "testnet"])
+            .args(["--", "record", "--receipt", fingerprint])
+            .output()
+            .await
+            .map_err(|e| format!("Could not run the Stellar CLI: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+    }
+}
+
+/// Fallback list for local mode: the same entries the setup script puts on
+/// Stellar. "Diploma Express" is deliberately absent.
+fn local_list() -> Vec<TrustedSource> {
+    [
+        ("GCKSFO63Z4OVXXULTTFQJNAKBSYTEI5VIKZISTUCITO77OCUO7VPZA4W", "Northfield University", "university"),
+        ("GA4K6NUZFXL3USVVOGVU2ZQD2YAOLQNDS2KITPVYWZQ7V2I3XXD76Z7R", "Maple Trust Bank", "bank"),
+        ("GAGUIDWAQY6FV3AF5WMGHW2TYQOQH6PWYMA33BM5MASB7HQ4UFKFNFWR", "CityHome Housing", "housing"),
+        (ONEPASS_KEY, "OnePass", "verifier"),
+    ]
+    .into_iter()
+    .map(|(public_key, name, kind)| TrustedSource {
+        public_key: public_key.to_string(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+    })
+    .collect()
 }

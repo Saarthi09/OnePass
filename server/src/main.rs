@@ -1,12 +1,19 @@
 //! The OnePass server.
 //!
-//! What it does:
-//!   * lets the user connect their institutions (it keeps an access token, never the data);
-//!   * when a company asks for facts, fetches just those facts from the right institution;
-//!   * shows the user exactly what would be shared, and waits for approval;
-//!   * passes the approved, signed facts to the company, which checks them itself.
+//! How one request travels:
+//!   1. A company asks OnePass for facts about a person (e.g. "is a student").
+//!   2. The person gets a notification and approves or denies. They also see,
+//!      and can choose, which of their institutions each fact will come from.
+//!   3. Only after approval, OnePass fetches each fact from that institution.
+//!   4. OnePass checks the institution's signature and checks on the Stellar
+//!      registry that the institution is genuine. If not, it refuses.
+//!   5. OnePass stamps each fact with its own signature ("verified by OnePass")
+//!      and hands it to the company. The institution's name is not passed on.
+//!   6. The company checks OnePass's stamp against OnePass's key on Stellar.
+//!   7. OnePass records a fingerprint of what it vouched for on Stellar, as a
+//!      permanent receipt, and forgets the facts.
 //!
-//! It also serves the web pages, including two invented companies for the demo.
+//! It also serves the web pages, including the invented demo companies.
 //! Everything is kept in memory, so restarting the server resets the demo.
 
 mod company;
@@ -20,50 +27,61 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use onepass_core::SignedFact;
-use rand::RngCore;
 use directory::SourceInfo;
+use onepass_core::{fingerprint, sign_fact, stellar_address, verify_fact, SignedFact, SigningKey};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// Where the stand-in institutions are running.
 const SOURCES_URL: &str = "http://127.0.0.1:4001";
 
-/// One line of a request: a fact the company wants, and what OnePass found for it.
+/// The receipt OnePass leaves on Stellar for one completed request.
 #[derive(Clone, Serialize)]
-struct Item {
-    field: String,
-    /// Kind of institution the company wants it from, e.g. "bank".
-    kind: String,
-    /// Which connected institution has it (None = the user has not connected one).
-    source_name: Option<String>,
-    /// The signed fact fetched from that institution.
-    fact: Option<SignedFact>,
+struct Receipt {
+    /// Fingerprint of what OnePass vouched for (reveals nothing personal).
+    fingerprint: String,
+    /// "pending", "recorded", or "not recorded"
+    status: String,
+    detail: Option<String>,
 }
 
-/// A company's request, from creation to the final verdict.
+/// A company's request, from creation to the final outcome.
 #[derive(Clone, Serialize)]
 struct Request {
     id: String,
     company: company::Company,
-    /// "pending", "verified", "rejected" or "denied"
+    /// "pending"  = waiting for the person to answer
+    /// "verified" = shared, and the company accepted it
+    /// "rejected" = shared, but the company's checks failed
+    /// "refused"  = OnePass itself would not vouch (e.g. untrusted institution)
+    /// "denied"   = the person said no
     status: String,
-    items: Vec<Item>,
+    /// Why OnePass refused, in words the person can read.
+    reason: Option<String>,
+    /// What the company received: facts stamped by OnePass. No institution names.
+    delivered: Vec<SignedFact>,
     verdict: Option<company::Verdict>,
+    receipt: Option<Receipt>,
 }
 
 /// Everything the server remembers while it runs.
 struct AppState {
     client: reqwest::Client,
-    /// The list of trusted institutions (on Stellar, or a local fallback).
+    /// The trusted list on Stellar (or a local fallback).
     registry: registry::Registry,
-    /// institution id -> access token. This is ALL OnePass stores about the user's accounts.
+    /// OnePass's own signing key, used to stamp facts it has verified.
+    onepass_key: SigningKey,
+    /// institution id -> access token. This is ALL OnePass keeps about the person's accounts.
     connections: Mutex<HashMap<String, String>>,
     requests: Mutex<HashMap<String, Request>>,
+    /// Request ids in the order they arrived, for the notification panel.
+    order: Mutex<Vec<String>>,
 }
 
 type Shared = Arc<AppState>;
@@ -86,12 +104,16 @@ fn random_id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
 // ───────────────────────── Connecting institutions ─────────────────────────
 
-/// GET /api/sources — every institution, and whether the user has connected it.
+/// GET /api/sources — every institution, whether the person has connected it,
+/// and whether it is on the registry.
 async fn list_sources(State(state): State<Shared>) -> Result<Json<Value>, ApiError> {
     let sources = directory(&state).await?;
-    // Check each institution against the registry, so the page can show who is trusted.
     let trusted = state.registry.trusted().await;
     let connections = state.connections.lock().unwrap();
     let list: Vec<Value> = sources
@@ -105,11 +127,17 @@ async fn list_sources(State(state): State<Shared>) -> Result<Json<Value>, ApiErr
             })
         })
         .collect();
+    let onepass_key = stellar_address(&state.onepass_key.verifying_key());
+    let onepass_registered = trusted.as_ref().ok().map(|t| {
+        t.iter().any(|x| x.public_key == onepass_key && x.kind == company::VERIFIER_KIND)
+    });
     Ok(Json(json!({
         "sources": list,
         "registry": state.registry.describe(),
         "registry_url": state.registry.explorer_url(),
         "registry_error": trusted.err(),
+        "onepass_key": onepass_key,
+        "onepass_registered": onepass_registered,
     })))
 }
 
@@ -120,7 +148,7 @@ struct Connect {
     password: String,
 }
 
-/// POST /api/connect — sign in to an institution on the user's behalf.
+/// POST /api/connect — sign in to an institution on the person's behalf.
 /// The password is passed straight through and never saved; only the token is kept.
 async fn connect(State(state): State<Shared>, Json(body): Json<Connect>) -> Result<Json<Value>, ApiError> {
     let response = state
@@ -150,7 +178,7 @@ async fn disconnect(State(state): State<Shared>, Json(body): Json<Disconnect>) -
     Json(json!({ "connected": false }))
 }
 
-// ───────────────────────────── Company requests ─────────────────────────────
+// ───────────────────────────── The company's side ─────────────────────────────
 
 /// GET /api/companies — the demo companies and what each asks for.
 async fn list_companies() -> Json<Value> {
@@ -162,58 +190,30 @@ struct NewRequest {
     company_id: String,
 }
 
-/// POST /api/requests — a company asks for facts about the user.
-/// OnePass works out which connected institution has each fact and fetches it,
-/// but shares nothing yet: the request waits for the user's approval.
+/// POST /api/requests — a company asks for facts about the person.
+/// Nothing is fetched yet. The request just waits in the person's notifications.
 async fn create_request(State(state): State<Shared>, Json(body): Json<NewRequest>) -> Result<Json<Value>, ApiError> {
     let company = company::companies()
         .into_iter()
         .find(|c| c.id == body.company_id)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "No such company"))?;
-    let sources = directory(&state).await?;
-    // Copy the tokens out so the lock is released before we make network calls.
-    let connections = state.connections.lock().unwrap().clone();
-
-    let mut items = Vec::new();
-    for want in &company.wants {
-        // Find a connected institution of the right kind that has this fact.
-        let source = sources.iter().find(|s| {
-            s.kind == want.kind && connections.contains_key(&s.id) && s.fields.iter().any(|f| f == want.field)
-        });
-        let mut item = Item {
-            field: want.field.to_string(),
-            kind: want.kind.to_string(),
-            source_name: source.map(|s| s.name.clone()),
-            fact: None,
-        };
-        if let Some(source) = source {
-            // Ask the institution for this one fact, using the stored token.
-            let reply: Value = state
-                .client
-                .get(format!("{SOURCES_URL}/sources/{}/facts?fields={}", source.id, want.field))
-                .bearer_auth(&connections[&source.id])
-                .send()
-                .await
-                .map_err(|_| error(StatusCode::BAD_GATEWAY, "Could not reach the institution"))?
-                .json()
-                .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, e.to_string()))?;
-            item.fact = serde_json::from_value(reply["facts"][0].clone()).ok();
-            if item.fact.is_none() {
-                // Token no longer accepted (e.g. the institutions were restarted).
-                item.source_name = None;
-            }
-        }
-        items.push(item);
-    }
-
-    let request = Request { id: random_id(), company, status: "pending".into(), items, verdict: None };
+    let request = Request {
+        id: random_id(),
+        company,
+        status: "pending".into(),
+        reason: None,
+        delivered: Vec::new(),
+        verdict: None,
+        receipt: None,
+    };
     let id = request.id.clone();
     state.requests.lock().unwrap().insert(id.clone(), request);
+    state.order.lock().unwrap().push(id.clone());
     Ok(Json(json!({ "id": id })))
 }
 
-/// GET /api/requests/{id} — the current state of a request.
+/// GET /api/requests/{id} — what the COMPANY can see about its request.
+/// There is deliberately nothing here about which institution a fact came from.
 async fn get_request(State(state): State<Shared>, Path(id): Path<String>) -> Result<Json<Request>, ApiError> {
     state
         .requests
@@ -225,39 +225,137 @@ async fn get_request(State(state): State<Shared>, Path(id): Path<String>) -> Res
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))
 }
 
+// ───────────────────────────── The person's side ─────────────────────────────
+
+/// GET /api/notifications — the person's requests, newest first.
+/// For each pending one, it lists which connected institutions could supply
+/// each fact, so the person can see and choose the source.
+async fn notifications(State(state): State<Shared>) -> Result<Json<Value>, ApiError> {
+    let sources = directory(&state).await?;
+    let trusted = state.registry.trusted().await.unwrap_or_default();
+    let connections = state.connections.lock().unwrap().clone();
+    let order = state.order.lock().unwrap().clone();
+    let requests = state.requests.lock().unwrap();
+
+    let list: Vec<Value> = order
+        .iter()
+        .rev()
+        .filter_map(|id| requests.get(id))
+        .map(|r| {
+            let items: Vec<Value> = r
+                .company
+                .wants
+                .iter()
+                .map(|field| {
+                    let options: Vec<Value> = sources
+                        .iter()
+                        .filter(|s| connections.contains_key(&s.id) && s.fields.iter().any(|f| f == field))
+                        .map(|s| {
+                            json!({
+                                "id": s.id, "name": s.name,
+                                "registered": trusted.iter().any(|t| t.public_key == s.public_key),
+                            })
+                        })
+                        .collect();
+                    json!({ "field": field, "options": options })
+                })
+                .collect();
+            json!({
+                "id": r.id, "company": r.company.name, "status": r.status,
+                "reason": r.reason, "items": items,
+            })
+        })
+        .collect();
+    let pending = list.iter().filter(|n| n["status"] == "pending").count();
+    Ok(Json(json!({ "pending": pending, "notifications": list })))
+}
+
 #[derive(Deserialize)]
 struct Approval {
-    /// The facts the user ticked.
-    fields: Vec<String>,
-    /// Demo switch: alter a fact on the way to the company, to show it gets caught.
+    /// fact name -> id of the institution the person chose to supply it.
+    /// A fact that is left out is simply not shared.
+    choices: HashMap<String, String>,
+    /// Demo switch: alter a fact after OnePass stamps it, to show the company catches it.
     #[serde(default)]
     tamper: bool,
 }
 
-/// POST /api/requests/{id}/approve — the user agrees to share the ticked facts.
-/// Only those facts are passed to the company, which then runs its own checks.
+/// Mark a request as refused by OnePass and say why.
+fn refuse(state: &AppState, id: &str, reason: String) -> Result<Json<Request>, ApiError> {
+    let mut requests = state.requests.lock().unwrap();
+    let request = requests.get_mut(id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
+    request.status = "refused".to_string();
+    request.reason = Some(reason);
+    Ok(Json(request.clone()))
+}
+
+/// POST /api/requests/{id}/approve — the person says yes.
+/// This is where OnePass does its real work: fetch, verify, stamp, deliver.
 async fn approve(
     State(state): State<Shared>,
     Path(id): Path<String>,
     Json(body): Json<Approval>,
 ) -> Result<Json<Request>, ApiError> {
-    // The company looks up the trusted list on the registry (Stellar).
+    let wants = {
+        let requests = state.requests.lock().unwrap();
+        let request = requests.get(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
+        if request.status != "pending" {
+            return Err(error(StatusCode::CONFLICT, "This request was already answered"));
+        }
+        request.company.wants.clone()
+    };
+
+    let sources = directory(&state).await?;
     let trusted = state.registry.trusted().await.map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
-    let mut requests = state.requests.lock().unwrap();
-    let request = requests.get_mut(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
-    if request.status != "pending" {
-        return Err(error(StatusCode::CONFLICT, "This request was already answered"));
+    let connections = state.connections.lock().unwrap().clone();
+
+    let mut delivered: Vec<SignedFact> = Vec::new();
+    for field in wants.iter().filter(|f| body.choices.contains_key(**f)) {
+        let source_id = &body.choices[*field];
+        let Some(source) = sources.iter().find(|s| &s.id == source_id) else {
+            return refuse(&state, &id, format!("Unknown institution '{source_id}'."));
+        };
+        let Some(token) = connections.get(source_id) else {
+            return refuse(&state, &id, format!("{} is not connected.", source.name));
+        };
+
+        // Step 3: fetch this one fact from the institution the person chose.
+        let reply: Value = state
+            .client
+            .get(format!("{SOURCES_URL}/sources/{}/facts?fields={}", source.id, field))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| error(StatusCode::BAD_GATEWAY, "Could not reach the institution"))?
+            .json()
+            .await
+            .map_err(|e| error(StatusCode::BAD_GATEWAY, e.to_string()))?;
+        let Ok(original) = serde_json::from_value::<SignedFact>(reply["facts"][0].clone()) else {
+            return refuse(&state, &id, format!("{} would not provide this. Try reconnecting it.", source.name));
+        };
+
+        // Step 4: OnePass verifies before it vouches.
+        if !verify_fact(&original) {
+            return refuse(&state, &id, format!("{}'s signature did not check out.", source.name));
+        }
+        if !trusted.iter().any(|t| t.public_key == original.source_key) {
+            return refuse(
+                &state,
+                &id,
+                format!("{} is not on the Stellar registry of trusted institutions, so OnePass will not vouch for it.", source.name),
+            );
+        }
+
+        // Step 5: stamp it with OnePass's own signature. The institution's
+        // signed original is dropped here; the company never sees it.
+        delivered.push(sign_fact(&state.onepass_key, field, &original.value, now()));
     }
 
-    let mut shared: Vec<SignedFact> = request
-        .items
-        .iter()
-        .filter(|i| body.fields.contains(&i.field))
-        .filter_map(|i| i.fact.clone())
-        .collect();
+    // Step 7 (prepared now, sent below): a fingerprint of exactly what was vouched for.
+    let receipt_fingerprint = fingerprint(&delivered);
 
     if body.tamper {
-        if let Some(fact) = shared.first_mut() {
+        if let Some(fact) = delivered.first_mut() {
             fact.value = match &fact.value {
                 Value::Bool(b) => json!(!b),
                 _ => json!("Someone Else"),
@@ -265,19 +363,50 @@ async fn approve(
         }
     }
 
+    // Step 6: the company runs its own checks on what arrived.
     let verdict = company::verify(
-        &request.company.wants,
-        &shared,
+        &wants,
+        &delivered,
         &trusted,
         state.registry.describe(),
         state.registry.explorer_url(),
     );
-    request.status = if verdict.ok { "verified" } else { "rejected" }.to_string();
-    request.verdict = Some(verdict);
-    Ok(Json(request.clone()))
+
+    let snapshot = {
+        let mut requests = state.requests.lock().unwrap();
+        let request = requests.get_mut(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
+        request.status = if verdict.ok { "verified" } else { "rejected" }.to_string();
+        request.verdict = Some(verdict);
+        request.delivered = delivered;
+        request.receipt = Some(Receipt {
+            fingerprint: receipt_fingerprint.clone(),
+            status: "pending".to_string(),
+            detail: None,
+        });
+        request.clone()
+    };
+
+    // Step 7: write the receipt to Stellar in the background (it takes a few
+    // seconds), so the person and the company are not kept waiting.
+    let background = state.clone();
+    tokio::spawn(async move {
+        let outcome = background.registry.record_receipt(&receipt_fingerprint).await;
+        let mut requests = background.requests.lock().unwrap();
+        if let Some(receipt) = requests.get_mut(&id).and_then(|r| r.receipt.as_mut()) {
+            match outcome {
+                Ok(()) => receipt.status = "recorded".to_string(),
+                Err(why) => {
+                    receipt.status = "not recorded".to_string();
+                    receipt.detail = Some(why);
+                }
+            }
+        }
+    });
+
+    Ok(Json(snapshot))
 }
 
-/// POST /api/requests/{id}/deny — the user refuses. Nothing is shared.
+/// POST /api/requests/{id}/deny — the person says no. Nothing is fetched or shared.
 async fn deny(State(state): State<Shared>, Path(id): Path<String>) -> Result<Json<Request>, ApiError> {
     let mut requests = state.requests.lock().unwrap();
     let request = requests.get_mut(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
@@ -296,9 +425,6 @@ async fn home_page() -> Html<&'static str> {
 async fn company_page() -> Html<&'static str> {
     Html(include_str!("../static/company.html"))
 }
-async fn approve_page() -> Html<&'static str> {
-    Html(include_str!("../static/approve.html"))
-}
 async fn style() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css")], include_str!("../static/style.css"))
 }
@@ -311,16 +437,16 @@ async fn main() {
     let state: Shared = Arc::new(AppState {
         client: reqwest::Client::new(),
         registry: registry::Registry::detect(),
+        // DEMO ONLY: a fixed key, so the same key can be listed on Stellar by the setup script.
+        onepass_key: onepass_core::demo_key("onepass"),
         connections: Mutex::new(HashMap::new()),
         requests: Mutex::new(HashMap::new()),
+        order: Mutex::new(Vec::new()),
     });
-
-    let state_info = state.registry.describe();
 
     let app = Router::new()
         .route("/", get(home_page))
         .route("/company/{id}", get(company_page))
-        .route("/approve/{id}", get(approve_page))
         .route("/style.css", get(style))
         .route("/app.js", get(script))
         .route("/api/sources", get(list_sources))
@@ -331,12 +457,23 @@ async fn main() {
         .route("/api/requests/{id}", get(get_request))
         .route("/api/requests/{id}/approve", post(approve))
         .route("/api/requests/{id}/deny", post(deny))
-        .with_state(state);
+        .route("/api/notifications", get(notifications))
+        .with_state(state.clone());
 
     let address = "127.0.0.1:4000";
     let listener = tokio::net::TcpListener::bind(address).await.expect("port 4000 is already in use");
     println!("OnePass is running. Open http://{address} in your browser.");
-    println!("Trusted-institution registry: {}", state_info);
+    println!("Registry: {}", state.registry.describe());
+    println!("OnePass verifier key: {}", stellar_address(&state.onepass_key.verifying_key()));
     println!("(The stand-in institutions must also be running: cargo run -p onepass-sources)");
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn onepass_key_matches_the_one_listed_on_the_registry() {
+        let key = onepass_core::demo_key("onepass");
+        assert_eq!(onepass_core::stellar_address(&key.verifying_key()), crate::registry::ONEPASS_KEY);
+    }
 }

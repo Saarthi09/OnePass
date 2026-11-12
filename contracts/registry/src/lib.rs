@@ -9,13 +9,18 @@
 //!   * No personal information is ever stored here: only institution keys,
 //!     names and kinds.
 //!
+//! It also keeps RECEIPTS. Each time OnePass vouches for someone's information
+//! it records a fingerprint (a hash) of what it vouched for. The fingerprint
+//! reveals nothing about the person, but it is timestamped by the blockchain
+//! and can never be altered or removed, so OnePass can later be held to it.
+//!
 //! A smart contract is a small program stored on the blockchain. Every Stellar
 //! node runs the same code and agrees on the result, so nobody (not even
 //! OnePass) can quietly show different companies a different list.
 
 #![no_std] // contracts run in a tiny sandbox without Rust's standard library
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Vec};
+use soroban_sdk::{contract, contractevent, contractimpl, contracttype, Address, BytesN, Env, Map, String, Vec};
 
 /// One trusted institution.
 #[contracttype]
@@ -29,11 +34,19 @@ pub struct Institution {
     pub kind: String,
 }
 
-/// Labels for the two things the contract stores.
+/// Published every time a receipt is recorded.
+#[contractevent]
+pub struct ReceiptRecorded {
+    pub receipt: BytesN<32>,
+}
+
+/// Labels for the things the contract stores.
 #[contracttype]
 enum DataKey {
     Admin,
     Institutions,
+    /// One entry per receipt: fingerprint -> time it was recorded.
+    Receipt(BytesN<32>),
 }
 
 // Storage on Stellar expires unless it is renewed. Time is counted in
@@ -91,6 +104,26 @@ impl Registry {
     pub fn list(env: Env) -> Vec<Institution> {
         load(&env).values()
     }
+
+    /// Admin only: record the fingerprint of one verification.
+    /// The blockchain stamps it with the current time; it cannot be changed later.
+    pub fn record(env: Env, receipt: BytesN<32>) {
+        require_admin(&env);
+        let key = DataKey::Receipt(receipt.clone());
+        if env.storage().persistent().has(&key) {
+            return; // already recorded: keep the original time
+        }
+        let now = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &now);
+        env.storage().persistent().extend_ttl(&key, KEEP_ALIVE_THRESHOLD, KEEP_ALIVE_LEDGERS);
+        // Announce it, so block explorers show each receipt as it happens.
+        ReceiptRecorded { receipt }.publish(&env);
+    }
+
+    /// Anyone: when was this fingerprint recorded? (Nothing = never.)
+    pub fn receipt_time(env: Env, receipt: BytesN<32>) -> Option<u64> {
+        env.storage().persistent().get(&DataKey::Receipt(receipt))
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +164,28 @@ mod test {
         registry.add(&key, &String::from_str(&env, "Old Bank"), &String::from_str(&env, "bank"));
         registry.remove(&key);
         assert_eq!(registry.get(&key), None);
+    }
+
+    #[test]
+    fn receipts_are_recorded_and_keep_their_first_time() {
+        use soroban_sdk::testutils::Ledger as _;
+        let (env, registry) = setup();
+        env.mock_all_auths();
+        let receipt = BytesN::from_array(&env, &[7u8; 32]);
+        assert_eq!(registry.receipt_time(&receipt), None);
+
+        env.ledger().set_timestamp(1_000);
+        registry.record(&receipt);
+        env.ledger().set_timestamp(2_000);
+        registry.record(&receipt); // recording again must not move the time
+        assert_eq!(registry.receipt_time(&receipt), Some(1_000));
+    }
+
+    #[test]
+    #[should_panic]
+    fn strangers_cannot_record_receipts() {
+        let (env, registry) = setup();
+        registry.record(&BytesN::from_array(&env, &[1u8; 32]));
     }
 
     #[test]

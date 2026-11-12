@@ -1,6 +1,11 @@
 //! The registry of trusted institutions.
 //!
-//! This answers one question: "which signing keys belong to genuine institutions?"
+//! This answers two questions:
+//!   * "which signing keys belong to genuine institutions?" (OnePass asks this
+//!     before vouching for a fact)
+//!   * "which key is OnePass's own?" (companies ask this before accepting
+//!     OnePass's stamp)
+//! It is also where OnePass records a receipt for every verification.
 //!
 //! STELLAR MODE (the real thing): the list lives in a smart contract on the
 //! Stellar testnet (see contracts/registry). This file asks the contract for
@@ -28,7 +33,10 @@ const STELLAR_IDENTITY: &str = "onepass-admin";
 /// How long an answer is reused before asking the blockchain again.
 const CACHE_FOR: Duration = Duration::from_secs(20);
 
-/// One institution on the registry.
+/// OnePass's own public key in the demo (the server checks this on startup).
+pub const ONEPASS_KEY: &str = "GCYK7UIOCLXXHFAJSIPZ56TC5LPDLIFL25R6TK3W2ZSIGRYG4DZBF4ME";
+
+/// One entry on the registry.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrustedSource {
     pub public_key: String,
@@ -106,13 +114,36 @@ impl Registry {
     }
 }
 
-/// Fallback list for local mode: the same three institutions the setup script
-/// puts on Stellar. "Diploma Express" is deliberately absent.
+impl Registry {
+    /// Record the fingerprint of one verification on Stellar.
+    /// This is a real blockchain transaction, so it takes a few seconds.
+    pub async fn record_receipt(&self, fingerprint: &str) -> Result<(), String> {
+        let Some(contract_id) = &self.contract_id else {
+            return Err("Stellar is not set up, so no receipt was recorded".to_string());
+        };
+        let output = tokio::process::Command::new("stellar")
+            .args(["contract", "invoke", "--id", contract_id])
+            .args(["--source-account", STELLAR_IDENTITY, "--network", "testnet"])
+            .args(["--", "record", "--receipt", fingerprint])
+            .output()
+            .await
+            .map_err(|e| format!("Could not run the Stellar CLI: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+    }
+}
+
+/// Fallback list for local mode: the same entries the setup script puts on
+/// Stellar. "Diploma Express" is deliberately absent.
 fn local_list() -> Vec<TrustedSource> {
     [
         ("GCKSFO63Z4OVXXULTTFQJNAKBSYTEI5VIKZISTUCITO77OCUO7VPZA4W", "Northfield University", "university"),
         ("GA4K6NUZFXL3USVVOGVU2ZQD2YAOLQNDS2KITPVYWZQ7V2I3XXD76Z7R", "Maple Trust Bank", "bank"),
         ("GAGUIDWAQY6FV3AF5WMGHW2TYQOQH6PWYMA33BM5MASB7HQ4UFKFNFWR", "CityHome Housing", "housing"),
+        (ONEPASS_KEY, "OnePass", "verifier"),
     ]
     .into_iter()
     .map(|(public_key, name, kind)| TrustedSource {

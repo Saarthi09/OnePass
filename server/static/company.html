@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <a class="brand" href="/" id="brand">Company</a>
+    <a class="brand" href="#" id="brand">Company</a>
     <span class="who">Demo company site (invented)</span>
   </header>
   <main id="page"><p class="sub">Loading…</p></main>
@@ -17,40 +17,61 @@
   <script>
     const page = document.getElementById("page");
     const companyId = lastPathPart();
-    const requestId = new URLSearchParams(location.search).get("request");
+    let requestId = new URLSearchParams(location.search).get("request");
+    let company;
+    let timer;
 
-    // What the company shows once the user has answered in OnePass.
+    const tick = (passed) => el("span", { class: passed ? "ok" : "bad" }, passed ? "✓" : "✗");
+
+    // The Stellar receipt line under a completed request.
+    function receiptLine(receipt) {
+      if (!receipt) return null;
+      const short = receipt.fingerprint.slice(0, 16) + "…";
+      if (receipt.status === "recorded") return el("div", { class: "row" }, el("div", { class: "grow" },
+        tick(true), " Receipt recorded on Stellar ", el("code", {}, short),
+        el("div", { class: "meta" }, "A permanent, timestamped fingerprint of this verification. It contains no personal information.")));
+      if (receipt.status === "pending") return el("div", { class: "row" }, el("div", { class: "waiting" },
+        el("span", { class: "dot" }), "Recording a receipt on Stellar… ", el("code", {}, short)));
+      return el("div", { class: "row" }, el("div", { class: "grow" },
+        "Receipt not recorded on Stellar. ", el("span", { class: "meta" }, receipt.detail || "")));
+    }
+
+    // What the company shows once the person has answered in OnePass.
     function result(request) {
       const c = request.company;
       if (request.status === "denied") {
-        return [el("div", { class: "banner bad" }, "You chose not to share. Nothing was sent to " + c.name + ".")];
+        return [el("div", { class: "banner bad" }, "The person declined. Nothing was sent to " + c.name + ".")];
+      }
+      if (request.status === "refused") {
+        return [el("div", { class: "banner bad" }, "OnePass could not verify this information, so nothing was sent to " + c.name + ".")];
       }
       const v = request.verdict;
-      const tick = (passed) => el("span", { class: passed ? "ok" : "bad" }, passed ? "✓" : "✗");
+      const keyOnRegistry = v.checks.some((check) => check.signer_is_onepass);
       return [
         el("div", { class: "banner " + (v.ok ? "ok" : "bad") }, v.ok ? "✓ " + c.success : "✗ Verification failed. " + c.name + " did not accept this."),
         el("div", { class: "card" },
-          el("h3", {}, "What " + c.name + " received and checked"),
+          el("h3", {}, "What " + c.name + " received"),
           v.checks.map((check) => el("div", { class: "row" },
             el("div", { class: "grow" },
               el("div", { class: "label" }, label(check.field)),
               el("div", { class: "value" }, check.received ? show(check.value) : "Not shared"),
               check.received && el("div", { class: "meta" },
-                tick(check.signature_ok), check.signature_ok ? " Signature genuine" : " Signature does not match (altered)", "  ·  ",
-                tick(check.source_trusted), check.source_trusted ? " Signed by " + check.source_name : " Signer not on the registry",
-                check.source_trusted && !check.right_kind ? "  ·  ✗ Wrong kind of institution" : ""))))),
-        el("p", { class: "meta" }, "Registry checked: ",
-          v.registry_url ? el("a", { href: v.registry_url, target: "_blank", rel: "noreferrer" }, v.registry) : v.registry),
+                tick(check.ok), " ",
+                check.ok ? "Verified by OnePass"
+                  : !check.signature_ok ? "OnePass's stamp does not match (the fact was altered)"
+                  : "Signed by a key that is not OnePass's registered key")))),
+          el("p", { class: "meta" }, c.name + " was not told which institution any of this came from.")),
+        el("div", { class: "card" },
+          el("h3", {}, "How " + c.name + " knows this is genuine"),
+          el("div", { class: "row" }, el("div", { class: "grow" },
+            tick(keyOnRegistry), keyOnRegistry ? " The stamp was made with OnePass's key, as listed on " : " The signing key was not found on ",
+            v.registry_url ? el("a", { href: v.registry_url, target: "_blank", rel: "noreferrer" }, v.registry) : v.registry)),
+          receiptLine(request.receipt)),
       ];
     }
 
-    async function load() {
-      const { companies } = await api("/api/companies");
-      const c = companies.find((x) => x.id === companyId);
-      if (!c) { page.replaceChildren(el("p", { class: "error" }, "No such company.")); return; }
-      document.title = c.name;
-      document.getElementById("brand").textContent = c.name;
-
+    function render(request) {
+      const c = company;
       const error = el("p", { class: "error" });
       const hero = el("div", { class: "company-hero" },
         el("h1", {}, c.name),
@@ -58,22 +79,46 @@
         el("button", { onclick: async () => {
           try {
             const { id } = await api("/api/requests", { company_id: c.id });
-            location.href = "/approve/" + id;   // hand over to OnePass for approval
+            requestId = id;
+            history.replaceState(null, "", "?request=" + id);
+            watch();
           } catch (e) { error.textContent = e.message; }
         } }, c.action + " with OnePass"));
 
       const parts = [hero, error];
-      if (requestId) {
-        try { parts.push(...result(await api("/api/requests/" + requestId))); }
-        catch (e) { error.textContent = e.message; }
+      if (!request) {
+        parts.push(el("p", { class: "meta" }, c.name + " will ask OnePass for: " + c.wants.map(label).join(", ") + "."));
+      } else if (request.status === "pending") {
+        parts.push(el("div", { class: "card waiting" }, el("span", { class: "dot" }),
+          el("div", {}, el("strong", {}, "Request sent to OnePass."), " Waiting for Alex Rivera to approve it. ",
+            el("div", { class: "meta" }, "Asked for: " + c.wants.map(label).join(", ")))));
       } else {
-        parts.push(el("p", { class: "meta" }, c.name + " will ask OnePass for: " +
-          c.wants.map((w) => label(w.field) + " (from a " + w.kind + ")").join(", ") + "."));
+        parts.push(...result(request));
       }
-      parts.push(el("div", { class: "actions" }, el("a", { class: "button secondary", href: "/" }, "Back to OnePass")));
-      page.replaceChildren(...parts);
+      fill(page, parts);
     }
-    load();
+
+    // Keep checking the request until it is answered and its receipt is settled.
+    async function watch() {
+      clearTimeout(timer);
+      let request = null;
+      if (requestId) {
+        try { request = await api("/api/requests/" + requestId); } catch { request = null; }
+      }
+      render(request);
+      const unsettled = request && (request.status === "pending" || (request.receipt && request.receipt.status === "pending"));
+      if (unsettled) timer = setTimeout(watch, 1500);
+    }
+
+    async function start() {
+      const { companies } = await api("/api/companies");
+      company = companies.find((x) => x.id === companyId);
+      if (!company) { fill(page, el("p", { class: "error" }, "No such company.")); return; }
+      document.title = company.name;
+      document.getElementById("brand").textContent = company.name;
+      watch();
+    }
+    start();
   </script>
 </body>
 </html>

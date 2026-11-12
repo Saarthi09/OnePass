@@ -1,0 +1,75 @@
+{
+  "_note": "Everything in this file is invented for demonstration. None of these institutions or people exist.",
+  "institutions": [
+    {
+      "id": "northfield-university",
+      "name": "Northfield University",
+      "kind": "university",
+      "records": {
+        "alex": {
+          "password": "demo",
+          "fields": {
+            "full_name": "Alex Rivera",
+            "student_id": "NU-204817",
+            "is_student": true,
+            "program": "Computer Science",
+            "enrolment_year": 2026
+          }
+        },
+        "priya": {
+          "password": "demo",
+          "fields": {
+            "full_name": "Priya Nair",
+            "student_id": "NU-198342",
+            "is_student": true,
+            "program": "Mathematical Finance",
+            "enrolment_year": 2025
+          }
+        }
+      }
+    },
+    {
+      "id": "maple-trust-bank",
+      "name": "Maple Trust Bank",
+      "kind": "bank",
+      "records": {
+        "alex": {
+          "password": "demo",
+          "fields": {
+            "full_name": "Alex Rivera",
+            "date_of_birth": "2008-03-14",
+            "over_18": true,
+            "address": "12 Example Street, Unit 4, Northfield",
+            "customer_since": 2024
+          }
+        },
+        "priya": {
+          "password": "demo",
+          "fields": {
+            "full_name": "Priya Nair",
+            "date_of_birth": "2007-09-02",
+            "over_18": true,
+            "address": "88 Sample Avenue, Northfield",
+            "customer_since": 2023
+          }
+        }
+      }
+    },
+    {
+      "id": "cityhome-housing",
+      "name": "CityHome Housing",
+      "kind": "housing",
+      "records": {
+        "alex": {
+          "password": "demo",
+          "fields": {
+            "full_name": "Alex Rivera",
+            "address": "12 Example Street, Unit 4, Northfield",
+            "is_tenant": true,
+            "tenancy_start": "2026-09-01"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -46,26 +46,36 @@ You need two terminals, both inside the project folder.
 # Terminal 1: the stand-in institutions
 cargo run -p onepass-sources
 
-# Terminal 2: OnePass and the demo company pages
+# Terminal 2: OnePass (landing page, person's page, requester page)
 cargo run -p onepass-server
 ```
 
-Then open http://127.0.0.1:4000 in a browser.
+Then open http://127.0.0.1:4000 in a browser. There are three pages:
 
-1. **Connect** Northfield University, Maple Trust Bank and CityHome Housing
-   (login `alex` / `demo`).
-2. **Open Harbour Talent** (a recruiter) in a new tab and send a background check.
-   The company page waits.
-3. Back on OnePass, a **notification** appears. Choose where each item comes from
-   (for example, address from the bank or from the housing agency) and approve.
-4. The recruiter's page shows the facts, each "Verified by OnePass", with no
-   institution names, plus the Stellar receipt.
-5. **The impostor:** disconnect Northfield University, connect **Diploma Express**,
-   and request the student discount from Stride Sportswear. OnePass refuses,
-   because Diploma Express is not on the Stellar registry.
-6. **Tampering:** approve a request with "Demo: alter a fact in transit" ticked.
-   The company rejects it, because OnePass's stamp no longer matches.
+| Page | Address | Who it is for |
+| --- | --- | --- |
+| Landing page | `/` | Explains OnePass |
+| Your OnePass | `/app` | The person whose information is shared |
+| For companies | `/request` | The company or recruiter asking for it |
+
+Open `/app` and `/request` in two tabs side by side.
+
+1. **On `/app`, connect** Northfield University, Maple Trust Bank and CityHome Housing
+   (the password is `demo`).
+2. **On `/request`,** leave the company as Harbour Talent and the person as `alex`, pick
+   "Background check" (or tick any items you like), and send the request.
+3. **Back on `/app`,** the request appears within two seconds. Choose where each item
+   comes from (address from the bank or the housing agency) and approve.
+4. **On `/request`,** the facts arrive stamped "Verified by OnePass", with no institution
+   names, followed by the Stellar receipt.
+5. **The impostor:** disconnect Northfield University, connect **Diploma Express**, and
+   request "Student discount". OnePass refuses, because Diploma Express is not on the
+   Stellar registry. The company is only told that it could not be verified.
+6. **Tampering:** approve a request with "Demo: alter a fact in transit" ticked. The
+   company's check fails, because OnePass's stamp no longer matches.
 7. **Deny** a request, or untick an item: the company gets only what was approved.
+8. **A second person:** switch "Signed in as" to Priya Nair on `/app`, and send a request
+   for `priya`. Each person only sees requests about themselves.
 
 `cargo test` runs the signature and smart-contract checks.
 
@@ -90,7 +100,7 @@ list, records no receipts, and says so on screen.
 | --- | --- |
 | `core/` | Signing and checking facts. Shared by the other two. |
 | `sources/` | Stand-in institutions (port 4001). **All names and records are invented.** |
-| `server/` | OnePass itself (port 4000): connect accounts, notifications, fetch, verify, stamp. Also serves the invented company pages. |
+| `server/` | OnePass itself (port 4000): connect accounts, requests, fetch, verify, stamp. Serves the three web pages from `server/static/`. |
 | `server/src/company.rs` | The checks a company runs on OnePass's stamp. |
 | `server/src/registry.rs` | Reads the trusted list from the Stellar contract and records receipts. |
 | `contracts/registry/` | The smart contract: trusted list, OnePass's key, receipts. |
@@ -114,4 +124,4 @@ connected institution, never a copy of the data.
 - Shared control of the registry (several organisations approving changes, not one admin)
 - Real institution integrations
 - Phone notifications and a phone-style approval screen
-- A company-side form for choosing which facts to request
+- Real sign-in for people and companies (the demo picks the person from a menu)

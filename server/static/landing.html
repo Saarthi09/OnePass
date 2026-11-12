@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OnePass: one identity, every door</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <nav class="nav">
+      <a class="brand push" href="/">OnePass</a>
+      <a class="link" href="#how">How it works</a>
+      <a class="link" href="#security">Security</a>
+      <a class="link" href="/request">For companies</a>
+      <a class="button pill" href="/app">Open demo</a>
+    </nav>
+
+    <section class="hero">
+      <div class="copy">
+        <h1>One card instead of a folder of documents.</h1>
+        <p>OnePass turns what your bank, university and landlord already know into one identity you control. Companies get verified facts. They never get your paperwork.</p>
+        <div class="actions">
+          <a class="button gold pill big" href="/app">Try the demo</a>
+          <a class="plain" href="#how">How it works</a>
+        </div>
+      </div>
+      <div class="pile">
+        <div class="paper a" aria-hidden="true">Bank statement</div>
+        <div class="paper b" aria-hidden="true">Enrolment letter</div>
+        <div class="paper c" aria-hidden="true">Lease agreement</div>
+        <div class="pass">
+          <div class="top"><span class="wordmark">OnePass</span><span class="secured">Secured by Stellar</span></div>
+          <div><div class="label">Identity holder</div><div class="name">Alex Rivera</div></div>
+          <div class="facts"><span>Identity</span><span>Address</span><span>Education</span><span>All verified</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="how">
+      <h2>How it works</h2>
+      <p>One identity. Every door. Three steps, and you decide at each one.</p>
+      <div class="three">
+        <div><span class="num">01</span><h3>Connect once</h3><p>Link the institutions that already hold your records. OnePass keeps permission to ask them, never a copy of your data.</p></div>
+        <div><span class="num">02</span><h3>Approve each request</h3><p>A company lists what it needs. You see exactly what is asked, choose where each item comes from, and say yes or no.</p></div>
+        <div><span class="num">03</span><h3>Delivered, verified</h3><p>OnePass fetches the facts, checks them, and hands them over stamped "Verified by OnePass". The company never learns which institutions you use.</p></div>
+      </div>
+    </section>
+
+    <section class="band" id="security">
+      <h2>Trust you can check</h2>
+      <p>Companies rely on OnePass's stamp. The Stellar blockchain is what makes that trust checkable instead of blind. No personal information is ever written to it.</p>
+      <div class="three">
+        <div><h3>A public rulebook</h3><p>The list of institutions OnePass may rely on lives in a smart contract. Every change is a permanent public transaction, so a fake university cannot be slipped in quietly.</p></div>
+        <div><h3>A key nobody can forge</h3><p>OnePass's signing key is published on Stellar. A company checks every stamp against it, without having to ask OnePass.</p></div>
+        <div><h3>A receipt for every verification</h3><p>Each approval leaves a timestamped fingerprint on the blockchain. It reveals nothing about you, and it can never be edited or deleted.</p></div>
+      </div>
+    </section>
+
+    <section class="band">
+      <h2>See it working</h2>
+      <p>The demo uses invented institutions and people. Open both pages side by side: send a request from one and approve it in the other.</p>
+      <div class="doors">
+        <div class="card"><h3>I am a person</h3><p>Connect your institutions, receive requests and decide what to share.</p><a class="button gold pill" href="/app">Open my OnePass</a></div>
+        <div class="card"><h3>I am a company</h3><p>Ask for exactly the facts you need and receive them verified.</p><a class="button pill" href="/request">Request information</a></div>
+      </div>
+    </section>
+
+    <footer>OnePass is a prototype built for the Blockchain Innovation Challenge. All institutions, companies and people shown are invented.</footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your OnePass</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <nav class="nav ruled">
+      <a class="brand push" href="/">OnePass</a>
+      <label class="small muted" for="who">Signed in as (demo)</label>
+      <select id="who" class="compact"></select>
+      <button class="pill" id="bell" type="button">Requests</button>
+    </nav>
+
+    <div class="two">
+      <div class="stack">
+        <div class="pass">
+          <div class="top"><span class="wordmark">OnePass</span><span class="secured">Secured by Stellar</span></div>
+          <div><div class="label">Identity holder</div><div class="name" id="holder"></div></div>
+          <div class="facts" id="summary"></div>
+        </div>
+
+        <section>
+          <div class="section-title"><h2>Your institutions</h2><span class="small muted">OnePass stores no copy of your data</span></div>
+          <div id="sources"><p class="muted">Loading…</p></div>
+          <p class="small muted" id="registry" style="margin-top:14px"></p>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section id="requests">
+          <div class="section-title"><h2>Requests</h2><a class="small" href="/request" target="_blank" rel="noreferrer">Open the requester page</a></div>
+          <div class="stack" id="pending" style="gap:16px"></div>
+        </section>
+        <section>
+          <div class="section-title"><h2>Recent activity</h2></div>
+          <div class="history" id="history"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    // Which person this page belongs to. The demo has no real sign-in: the
+    // address carries the OnePass ID, e.g. /app?user=priya.
+    const user = queryParam("user", "alex");
+
+    async function loadUsers() {
+      const { users } = await api("/api/users");
+      const select = document.getElementById("who");
+      fill(select, users.map((u) => {
+        const option = el("option", { value: u.id }, u.name);
+        option.selected = u.id === user;
+        return option;
+      }));
+      select.addEventListener("change", () => { location.href = "/app?user=" + select.value; });
+      const me = users.find((u) => u.id === user);
+      document.getElementById("holder").textContent = me ? me.name : user;
+      document.title = (me ? me.name : user) + ": OnePass";
+    }
+
+    // ───────────── Institutions ─────────────
+    async function loadSources() {
+      const box = document.getElementById("sources");
+      let data;
+      try { data = await api("/api/sources?user=" + encodeURIComponent(user)); }
+      catch (e) { fill(box, el("p", { class: "error" }, e.message)); return; }
+
+      const connected = data.sources.filter((s) => s.connected);
+      fill(document.getElementById("summary"),
+        el("span", {}, connected.length + (connected.length === 1 ? " institution connected" : " institutions connected")),
+        connected.length > 0 && el("span", {}, "Shared only with your approval"));
+
+      fill(document.getElementById("registry"),
+        "Trusted institutions are listed on: ",
+        data.registry_url ? el("a", { href: data.registry_url, target: "_blank", rel: "noreferrer" }, data.registry) : data.registry,
+        data.registry_error && el("div", { class: "error" }, data.registry_error));
+
+      fill(box, el("div", { class: "rows" }, data.sources.map((s) => {
+        const error = el("div", { class: "error", style: "flex-basis:100%" });
+        const row = el("div", { class: "row" },
+          el("div", { class: "grow" },
+            el("span", { class: "title" }, s.name),
+            el("span", { class: "small muted" }, s.fields.map(label).join(", "))),
+          s.registered === true && el("span", { class: "tag ok" }, "On the Stellar registry"),
+          s.registered === false && el("span", { class: "tag bad" }, "Not on the registry"));
+
+        if (s.connected) {
+          row.append(el("button", { type: "button", onclick: async () => {
+            await api("/api/disconnect", { user, source_id: s.id }); refresh();
+          } }, "Disconnect"));
+        } else {
+          // Signing in to the institution. OnePass passes the password on and keeps only a token.
+          const pass = el("input", { type: "password", class: "compact", value: "demo", "aria-label": "Your password at " + s.name });
+          row.append(el("form", { onsubmit: async (event) => {
+            event.preventDefault();
+            try { await api("/api/connect", { user, source_id: s.id, password: pass.value }); refresh(); }
+            catch (e) { error.textContent = e.message; }
+          } }, pass, el("button", { type: "submit", class: "gold" }, "Connect")), error);
+        }
+        return row;
+      })));
+    }
+
+    // ───────────── Requests (the notification panel) ─────────────
+    let lastSeen = "";   // what is on screen, so choices are not reset while you make them
+
+    const OUTCOMES = {
+      verified: ["Shared", "ok"],
+      rejected: ["Shared, but the company's check failed", "bad"],
+      denied: ["Denied by you", "muted"],
+      refused: ["Refused by OnePass", "bad"],
+    };
+
+    // One pending request: what is asked, where each item would come from, approve or deny.
+    function pendingCard(n) {
+      const error = el("p", { class: "error" });
+      const tamper = el("input", { type: "checkbox", id: "tamper-" + n.id });
+      const rows = n.items.map((item) => {
+        const box = el("input", { type: "checkbox", id: n.id + "-" + item.field });
+        if (item.options.length === 0) {
+          box.disabled = true;
+          return { item, box, row: el("div", {}, box,
+            el("label", { class: "grow", for: box.id }, label(item.field)),
+            el("span", { class: "small bad" }, "No connected institution has this")) };
+        }
+        box.checked = true;
+        const select = el("select", { class: "compact", "aria-label": "Source for " + label(item.field) },
+          item.options.map((o) => el("option", { value: o.id }, "from " + o.name + (o.registered ? "" : " (not on registry)"))));
+        return { item, box, select, row: el("div", {}, box,
+          el("label", { class: "grow", for: box.id }, label(item.field)), select) };
+      });
+
+      async function answer(path, body) {
+        try { await api("/api/requests/" + n.id + path, body); }
+        catch (e) { error.textContent = e.message; return; }
+        refresh();
+      }
+
+      return el("div", { class: "card gold-edge" },
+        el("div", { class: "head" }, el("span", { class: "eyebrow gold" }, "New request")),
+        el("h2", {}, n.requester + " is asking for your information"),
+        n.reason && el("p", { class: "muted" }, "Their reason: " + n.reason),
+        el("p", { class: "small muted" }, "Untick anything you do not want to share and choose where each item comes from. The company is never told the source."),
+        el("div", { class: "lines" }, rows.map((r) => r.row)),
+        error,
+        el("div", { class: "actions" },
+          el("button", { type: "button", class: "gold wide", onclick: () => {
+            const choices = {};
+            for (const r of rows) if (r.box.checked && r.select) choices[r.item.field] = r.select.value;
+            answer("/approve", { choices, tamper: tamper.checked });
+          } }, "Approve and share"),
+          el("button", { type: "button", class: "wide", onclick: () => answer("/deny", {}) }, "Deny")),
+        el("label", { class: "demo", for: tamper.id }, tamper, "Demo: alter a fact in transit, to show the company catches it"));
+    }
+
+    function historyRow(n) {
+      const [text, tone] = OUTCOMES[n.status] || [n.status, "muted"];
+      return el("div", {},
+        el("div", {},
+          el("div", { style: "font-weight:600;font-size:15px" }, n.requester),
+          el("div", { class: "small muted" }, n.refusal || n.wants.map(label).join(", "))),
+        el("span", { class: "small " + tone, style: "font-weight:600" }, text));
+    }
+
+    async function poll() {
+      let data;
+      try { data = await api("/api/notifications?user=" + encodeURIComponent(user)); } catch { return; }
+
+      fill(document.getElementById("bell"), "Requests", data.pending > 0 && el("span", { class: "count" }, data.pending));
+
+      const seen = JSON.stringify(data.notifications);
+      if (seen === lastSeen) return;
+      lastSeen = seen;
+
+      const pending = data.notifications.filter((n) => n.status === "pending");
+      const answered = data.notifications.filter((n) => n.status !== "pending");
+      fill(document.getElementById("pending"), pending.length
+        ? pending.map(pendingCard)
+        : el("div", { class: "empty" }, "No requests waiting. When a company asks for your information, it appears here."));
+      fill(document.getElementById("history"), answered.length
+        ? answered.map(historyRow)
+        : el("p", { class: "small muted" }, "Nothing yet."));
+    }
+
+    function refresh() { lastSeen = ""; loadSources(); poll(); }
+
+    document.getElementById("bell").addEventListener("click", () => {
+      document.getElementById("requests").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    loadUsers();
+    loadSources();
+    poll();
+    setInterval(poll, 2000);
+  </script>
+</body>
+</html>

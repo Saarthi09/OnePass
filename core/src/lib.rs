@@ -65,20 +65,97 @@ pub fn sign_fact(key: &SigningKey, field: &str, value: &Value, issued_at: u64) -
 
 /// Anyone's side: was this fact really signed by the key it names, and is it unaltered?
 pub fn verify_fact(fact: &SignedFact) -> bool {
-    let Ok(address) = stellar_strkey::ed25519::PublicKey::from_string(&fact.source_key) else {
+    let text = message(&fact.source_key, &fact.field, &fact.value, fact.issued_at);
+    signature_matches(&fact.source_key, &text, &fact.signature)
+}
+
+/// The check underneath every verification: was `text` signed by the owner of
+/// `public_key` (a Stellar "G..." address), producing `signature` (base64)?
+fn signature_matches(public_key: &str, text: &str, signature: &str) -> bool {
+    let Ok(address) = stellar_strkey::ed25519::PublicKey::from_string(public_key) else {
         return false;
     };
     let Ok(public_key) = VerifyingKey::from_bytes(&address.0) else {
         return false;
     };
-    let Ok(bytes) = BASE64.decode(&fact.signature) else {
+    let Ok(bytes) = BASE64.decode(signature) else {
         return false;
     };
     let Ok(signature) = Signature::from_slice(&bytes) else {
         return false;
     };
-    let text = message(&fact.source_key, &fact.field, &fact.value, fact.issued_at);
     public_key.verify(text.as_bytes(), &signature).is_ok()
+}
+
+/// Sign any piece of text. Returns the signature in base64.
+pub fn sign_text(key: &SigningKey, text: &str) -> String {
+    BASE64.encode(key.sign(text.as_bytes()).to_bytes())
+}
+
+/// Was `text` signed by the owner of `public_key` (a Stellar "G..." address)?
+pub fn verify_text(public_key: &str, text: &str, signature: &str) -> bool {
+    signature_matches(public_key, text, signature)
+}
+
+/// A fact stamped by OnePass for ONE company and ONE request.
+///
+/// It differs from a `SignedFact` in what the signature covers. Besides the
+/// fact itself, OnePass signs:
+///   * `audience`   - the company it was issued to,
+///   * `request_id` - the request it answers,
+///   * `expires_at` - when it stops being valid.
+/// So a company cannot pass the stamp on to someone else, reuse it for another
+/// request, or keep presenting it later: any of those fails the check.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Stamp {
+    /// OnePass's public key, in Stellar "G..." format.
+    pub signer_key: String,
+    pub field: String,
+    pub value: Value,
+    pub audience: String,
+    pub request_id: String,
+    /// Seconds since 1 Jan 1970.
+    pub issued_at: u64,
+    pub expires_at: u64,
+    /// OnePass's signature over everything above, in base64.
+    pub signature: String,
+}
+
+fn stamp_message(s: &Stamp) -> String {
+    format!(
+        "onepass-stamp-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        s.signer_key, s.audience, s.request_id, s.field, s.value, s.issued_at, s.expires_at
+    )
+}
+
+/// OnePass's side: stamp one verified fact for one company and one request.
+pub fn sign_stamp(
+    key: &SigningKey,
+    field: &str,
+    value: &Value,
+    audience: &str,
+    request_id: &str,
+    issued_at: u64,
+    expires_at: u64,
+) -> Stamp {
+    let mut stamp = Stamp {
+        signer_key: stellar_address(&key.verifying_key()),
+        field: field.to_string(),
+        value: value.clone(),
+        audience: audience.to_string(),
+        request_id: request_id.to_string(),
+        issued_at,
+        expires_at,
+        signature: String::new(),
+    };
+    stamp.signature = BASE64.encode(key.sign(stamp_message(&stamp).as_bytes()).to_bytes());
+    stamp
+}
+
+/// Anyone's side: is the stamp's signature genuine and is nothing in it altered?
+/// (Whether it was issued to YOU, and is still in date, is checked separately.)
+pub fn verify_stamp(stamp: &Stamp) -> bool {
+    signature_matches(&stamp.signer_key, &stamp_message(stamp), &stamp.signature)
 }
 
 #[cfg(test)]
@@ -111,18 +188,43 @@ mod tests {
         fact.source_key = stellar_address(&university.verifying_key());
         assert!(!verify_fact(&fact));
     }
+
+    #[test]
+    fn genuine_stamp_passes() {
+        let key = demo_key("onepass");
+        let stamp = sign_stamp(&key, "is_student", &json!(true), "Harbour Talent", "req1", 100, 700);
+        assert!(verify_stamp(&stamp));
+    }
+
+    #[test]
+    fn stamp_cannot_be_readdressed_or_extended() {
+        let key = demo_key("onepass");
+        let stamp = sign_stamp(&key, "is_student", &json!(true), "Harbour Talent", "req1", 100, 700);
+
+        let mut readdressed = stamp.clone();
+        readdressed.audience = "Another Company".to_string(); // passed on to someone else
+        assert!(!verify_stamp(&readdressed));
+
+        let mut reused = stamp.clone();
+        reused.request_id = "req2".to_string(); // replayed for a different request
+        assert!(!verify_stamp(&reused));
+
+        let mut extended = stamp.clone();
+        extended.expires_at = 9_999_999; // expiry pushed back
+        assert!(!verify_stamp(&extended));
+    }
 }
 
-/// A fingerprint (SHA-256 hash) of a set of signed facts, as 64 hex characters.
+/// A fingerprint (SHA-256 hash) of a set of stamped facts, as 64 hex characters.
 ///
 /// It is built from the signatures only, so it reveals nothing about the facts
 /// themselves, yet anyone holding the same facts can recompute it and get the
 /// same answer. This is what OnePass records on Stellar as a receipt.
-pub fn fingerprint(facts: &[SignedFact]) -> String {
+pub fn fingerprint(stamps: &[Stamp]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"onepass-receipt-v1");
-    for fact in facts {
-        hasher.update(fact.signature.as_bytes());
+    for stamp in stamps {
+        hasher.update(stamp.signature.as_bytes());
     }
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }

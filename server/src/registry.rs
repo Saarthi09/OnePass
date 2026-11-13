@@ -5,6 +5,8 @@
 //!     before vouching for a fact)
 //!   * "which key is OnePass's own?" (companies ask this before accepting
 //!     OnePass's stamp)
+//!   * "which key belongs to this company?" (OnePass asks this before telling
+//!     a person that a request really comes from the company it names)
 //! It is also where OnePass records a receipt for every verification.
 //!
 //! STELLAR MODE (the real thing): the list lives in a smart contract on the
@@ -48,6 +50,8 @@ pub struct Registry {
     /// Some(id) = Stellar mode, None = local mode.
     contract_id: Option<String>,
     cache: Mutex<Option<(Instant, Vec<TrustedSource>)>>,
+    /// The list used in local mode. It can change while the server runs.
+    local: Mutex<Vec<TrustedSource>>,
 }
 
 impl Registry {
@@ -57,7 +61,7 @@ impl Registry {
             .ok()
             .map(|text| text.trim().to_string())
             .filter(|id| !id.is_empty());
-        Registry { contract_id, cache: Mutex::new(None) }
+        Registry { contract_id, cache: Mutex::new(None), local: Mutex::new(local_list()) }
     }
 
     /// A human-readable description, shown on the result page.
@@ -78,7 +82,7 @@ impl Registry {
     /// The current list of trusted institutions.
     pub async fn trusted(&self) -> Result<Vec<TrustedSource>, String> {
         let Some(contract_id) = &self.contract_id else {
-            return Ok(local_list());
+            return Ok(self.local.lock().unwrap().clone());
         };
 
         // Reuse a recent answer if we have one.
@@ -115,6 +119,53 @@ impl Registry {
 }
 
 impl Registry {
+    /// Add an entry to the registry (admin only). On Stellar this is a real
+    /// transaction, signed by the registry's admin, so it takes a few seconds.
+    pub async fn add(&self, public_key: &str, name: &str, kind: &str) -> Result<(), String> {
+        if self.contract_id.is_none() {
+            let mut list = self.local.lock().unwrap();
+            list.retain(|entry| entry.public_key != public_key);
+            list.push(TrustedSource {
+                public_key: public_key.to_string(),
+                name: name.to_string(),
+                kind: kind.to_string(),
+            });
+            return Ok(());
+        }
+        self.change(&["add", "--public_key", public_key, "--name", name, "--kind", kind]).await
+    }
+
+    /// Take an entry off the registry (admin only).
+    pub async fn remove(&self, public_key: &str) -> Result<(), String> {
+        if self.contract_id.is_none() {
+            self.local.lock().unwrap().retain(|entry| entry.public_key != public_key);
+            return Ok(());
+        }
+        self.change(&["remove", "--public_key", public_key]).await
+    }
+
+    /// Send one change to the contract, then forget the remembered list so the
+    /// next lookup sees the change straight away.
+    async fn change(&self, call: &[&str]) -> Result<(), String> {
+        let contract_id = self.contract_id.as_ref().expect("only called in Stellar mode");
+        let output = tokio::process::Command::new("stellar")
+            .args(["contract", "invoke", "--id", contract_id])
+            .args(["--source-account", STELLAR_IDENTITY, "--network", "testnet"])
+            .arg("--")
+            .args(call)
+            .output()
+            .await
+            .map_err(|e| format!("Could not run the Stellar CLI (is it installed?): {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "The Stellar registry change failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        *self.cache.lock().unwrap() = None;
+        Ok(())
+    }
+
     /// Record the fingerprint of one verification on Stellar.
     /// This is a real blockchain transaction, so it takes a few seconds.
     pub async fn record_receipt(&self, fingerprint: &str) -> Result<(), String> {
@@ -144,6 +195,8 @@ fn local_list() -> Vec<TrustedSource> {
         ("GA4K6NUZFXL3USVVOGVU2ZQD2YAOLQNDS2KITPVYWZQ7V2I3XXD76Z7R", "Maple Trust Bank", "bank"),
         ("GAGUIDWAQY6FV3AF5WMGHW2TYQOQH6PWYMA33BM5MASB7HQ4UFKFNFWR", "CityHome Housing", "housing"),
         (ONEPASS_KEY, "OnePass", "verifier"),
+        // A company that has registered, so its requests can be recognised.
+        ("GDT4YT2YQDWX65RZEZFTPSCZWJG5ZNEJLAARBFQLRNY75WADENDLQQ6A", "Harbour Talent", "company"),
     ]
     .into_iter()
     .map(|(public_key, name, kind)| TrustedSource {

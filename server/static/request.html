@@ -25,6 +25,7 @@
         <div class="field">
           <label for="requester">Your company</label>
           <input id="requester" type="text" value="Harbour Talent" required>
+          <div class="demo-switch" id="registration"></div>
         </div>
 
         <div class="field">
@@ -45,6 +46,8 @@
           <input id="reason" type="text" value="">
         </div>
 
+        <label class="demo" for="impostor"><input type="checkbox" id="impostor"> Demo: send this as a scammer using the company's name</label>
+
         <p class="error" id="error"></p>
         <button type="submit" class="gold pill big" style="align-self:flex-start">Send request</button>
       </form>
@@ -60,6 +63,7 @@
     const result = document.getElementById("result");
     const boxes = {};       // fact name -> its tick box
     let timer;
+    let kept = null;        // the company's own copy of the result, once it has arrived
 
     // ───────────── The form ─────────────
     async function setup() {
@@ -84,6 +88,35 @@
       choose(presets[presets.length - 1]);
     }
 
+    // DEMO: the registry admin's switch. Puts Harbour Talent on the registry of
+    // companies or takes it off, so both cases can be shown: a verified company
+    // and an unverified one. On Stellar this is a real transaction.
+    async function registration(change) {
+      const box = document.getElementById("registration");
+      let c;
+      try {
+        if (change !== undefined) {
+          fill(box, el("span", { class: "waiting small" }, el("span", { class: "dot" }), "Updating the registry…"));
+          c = await api("/api/demo/company", { registered: change });
+        } else {
+          c = await api("/api/demo/company");
+        }
+      } catch (e) {
+        fill(box, el("span", { class: "small bad" }, e.message),
+          el("button", { type: "button", class: "pill", onclick: () => registration() }, "Try again"));
+        return;
+      }
+      const where = c.on_stellar ? "the Stellar registry" : "the registry";
+      fill(box,
+        el("span", { class: "tag " + (c.registered ? "ok" : "bad") }, c.registered ? "Registered company" : "Not registered"),
+        el("span", { class: "small muted grow" },
+          c.name + (c.registered ? " is on " + where + ". Its requests arrive as verified."
+                                 : " is not on " + where + ". Its requests arrive as unverified.")),
+        el("button", { type: "button", class: "pill", onclick: () => registration(!c.registered) },
+          c.registered ? "Demo: remove from registry" : "Demo: add to registry"));
+    }
+    registration();
+
     document.getElementById("form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const error = document.getElementById("error");
@@ -94,6 +127,7 @@
           user: document.getElementById("who").value,
           fields: Object.values(boxes).filter((b) => b.checked).map((b) => b.value),
           reason: document.getElementById("reason").value,
+          impostor: document.getElementById("impostor").checked,
         });
         watch(id);
       } catch (e) { error.textContent = e.message; }
@@ -159,20 +193,61 @@
               el("span", { class: "k" }, label(c.field)),
               el("span", { class: "v" },
                 c.received ? show(c.value) : "Not shared",
-                c.received && !c.ok && el("div", { class: "small bad", style: "font-weight:500" },
-                  c.signature_ok ? "Signed by a key that is not OnePass's" : "Altered after OnePass stamped it")))),
-            el("p", { class: "small muted", style: "padding-top:12px;border-top:1px solid var(--line)" },
+                c.received && !c.ok && el("div", { class: "small bad", style: "font-weight:500" }, whyFailed(c))))),
+            r.expires_at && el("p", { class: "small muted", style: "padding-top:12px;border-top:1px solid var(--line)" },
+              "Issued to " + r.requester + " only, for this request. Valid until " + clock(r.expires_at) + "."),
+            el("p", { class: "small muted" },
               "Sources are not disclosed. OnePass checked each one against the Stellar registry of trusted institutions before vouching for it.")),
           el("div", { class: "card", style: "gap:0;background:transparent" },
             el("span", { class: "eyebrow", style: "padding-bottom:10px" }, "Proof on Stellar"),
             el("div", { class: "pair" }, el("span", { class: "k" }, "OnePass signing key"),
               el("span", { class: "v " + (keyOk ? "ok" : "bad") }, keyOk ? "On the registry" : "Not found on the registry")),
             receiptLine(r.receipt),
+            el("div", { class: "pair" }, el("span", { class: "k" }, "OnePass's copy of these facts"),
+              r.purged ? el("span", { class: "v ok" }, "Deleted")
+                       : el("span", { class: "waiting small" }, el("span", { class: "dot" }), "Deleted 30 seconds after delivery")),
             el("div", { class: "pair" }, el("span", { class: "k" }, "Registry"),
               el("span", { class: "small", style: "text-align:right" },
                 v.registry_url ? el("a", { href: v.registry_url, target: "_blank", rel: "noreferrer" }, "View the contract on Stellar") : v.registry))));
+        if (v.ok) parts.push(replayBox(r));
       }
       fill(result, parts);
+    }
+
+    const clock = (seconds) => new Date(seconds * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    // In plain words, why a stamped fact failed the company's check.
+    function whyFailed(c) {
+      if (!c.signature_ok) return "Altered after OnePass stamped it";
+      if (!c.signer_is_onepass) return "Signed by a key that is not OnePass's";
+      if (!c.issued_to_me) return "Issued to a different company";
+      if (!c.in_date) return "Expired";
+      return "";
+    }
+
+    // DEMO: can a company pass its verified result on to someone else?
+    // "Northgate Rentals" receives the same stamps and runs the same checks.
+    function replayBox(r) {
+      const other = "Northgate Rentals";
+      const out = el("div", {});
+      const button = el("button", { type: "button", onclick: async () => {
+        try {
+          const v = await api("/api/replay", { stamps: r.delivered, as_company: other });
+          fill(out,
+            el("p", { class: v.ok ? "ok" : "bad", style: "font-weight:600;margin-top:12px" },
+              v.ok ? other + " accepted it." : other + " rejected it."),
+            v.checks.map((c) => el("div", { class: "pair" },
+              el("span", { class: "k" }, label(c.field)),
+              el("span", { class: "small " + (c.ok ? "ok" : "bad"), style: "text-align:right" }, c.ok ? "Accepted" : whyFailed(c)))),
+            el("p", { class: "small muted", style: "margin-top:10px" },
+              "The signatures are genuine, but each stamp names " + r.requester + " and this request, so nobody else can use it."));
+        } catch (e) { fill(out, el("p", { class: "error" }, e.message)); }
+      } }, "Forward this result to " + other);
+      return el("div", { class: "card", style: "gap:10px;background:transparent" },
+        el("span", { class: "eyebrow" }, "Demo: can this result be passed on?"),
+        el("p", { class: "small muted" }, "Suppose " + r.requester + " sends these verified facts to another company."),
+        el("div", {}, button),
+        out);
     }
 
     // Keep checking until the request is answered and its receipt is settled.
@@ -180,8 +255,21 @@
       clearTimeout(timer);
       let r;
       try { r = await api("/api/requests/" + id); } catch { return; }
-      render(r);
-      const unsettled = r.status === "pending" || (r.receipt && r.receipt.status === "pending");
+
+      // Once OnePass has wiped its copy, the company still has its own: keep
+      // showing that, and only update what changed (the receipt, the wipe).
+      if (r.purged && kept && kept.id === r.id) {
+        kept.purged = true;
+        kept.receipt = r.receipt;
+      } else {
+        kept = r;
+      }
+      render(kept);
+
+      const delivered = r.status === "verified" || r.status === "rejected";
+      const unsettled = r.status === "pending"
+        || (r.receipt && r.receipt.status === "pending")
+        || (delivered && !r.purged);
       if (unsettled) timer = setTimeout(() => watch(id), 1500);
     }
 

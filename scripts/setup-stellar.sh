@@ -60,6 +60,9 @@ add GAGUIDWAQY6FV3AF5WMGHW2TYQOQH6PWYMA33BM5MASB7HQ4UFKFNFWR "CityHome Housing" 
 # "Diploma Express" is deliberately NOT added: it is the impostor in the demo.
 # OnePass's own key, so companies can check that a "verified by OnePass" stamp is real.
 add GCYK7UIOCLXXHFAJSIPZ56TC5LPDLIFL25R6TK3W2ZSIGRYG4DZBF4ME "OnePass" verifier
+# A registered company. OnePass checks each request's signature against this key
+# before telling the person the request really comes from Harbour Talent.
+add GDT4YT2YQDWX65RZEZFTPSCZWJG5ZNEJLAARBFQLRNY75WADENDLQQ6A "Harbour Talent" company
 
 echo "== 5/5  Save the contract id =="
 echo "$CONTRACT_ID" > stellar-registry.txt

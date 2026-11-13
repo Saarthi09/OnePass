@@ -103,6 +103,18 @@ Open `/app` and `/request` in two tabs side by side.
 
 See [SECURITY.md](SECURITY.md) for what OnePass protects against and the prototype's known limits.
 
+## Hosting the demo online
+
+The `Dockerfile` runs both programs in one container, so any Docker host works
+(Railway, Render, Fly). On Railway: **New Project → Deploy from GitHub repo →
+OnePass**, then **Settings → Networking → Generate Domain**. Railway sets `PORT`
+and the server listens on it.
+
+To use the Stellar registry online, add the variable `ONEPASS_ADMIN_SECRET`
+with the secret key of the `onepass-admin` identity
+(`stellar keys show onepass-admin` on the machine that ran the setup script).
+Without it the hosted demo uses the local copy of the registry.
+
 ## Putting the registry on Stellar
 
 One time, to deploy the smart contract to the Stellar testnet:

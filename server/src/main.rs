@@ -674,8 +674,16 @@ async fn main() {
         .route("/api/demo/company", get(demo_company).post(set_demo_company))
         .with_state(state.clone());
 
-    let address = "127.0.0.1:4000";
-    let listener = tokio::net::TcpListener::bind(address).await.expect("port 4000 is already in use");
+    // Locally this is 127.0.0.1:4000. A hosting service (Railway, Render, Fly)
+    // sets PORT and needs the server reachable from outside, so then we listen
+    // on every network interface instead.
+    let address = match std::env::var("PORT") {
+        Ok(port) => format!("0.0.0.0:{port}"),
+        Err(_) => "127.0.0.1:4000".to_string(),
+    };
+    let listener = tokio::net::TcpListener::bind(&address)
+        .await
+        .unwrap_or_else(|_| panic!("{address} is already in use"));
     println!("OnePass is running. Open http://{address} in your browser.");
     println!("Registry: {}", state.registry.describe());
     println!("OnePass verifier key: {}", stellar_address(&state.onepass_key.verifying_key()));

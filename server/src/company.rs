@@ -9,10 +9,12 @@
 //!   1. Is OnePass's signature on each fact genuine and the fact unaltered?
 //!   2. Is the key that signed it really OnePass's? It looks the key up on the
 //!      Stellar registry rather than taking anyone's word for it.
-//!   3. Did it receive everything it asked for?
+//!   3. Was the stamp issued to this company, for this request, and is it still
+//!      in date? (This stops stamps being passed on or reused.)
+//!   4. Did it receive everything it asked for?
 
 use crate::registry::TrustedSource;
-use onepass_core::{verify_fact, SignedFact};
+use onepass_core::{verify_stamp, Stamp};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -63,16 +65,20 @@ pub fn presets() -> Vec<Preset> {
     ]
 }
 
-/// The outcome of checking one fact (or noticing it is missing).
+/// The outcome of checking one stamped fact (or noticing it is missing).
 #[derive(Clone, Serialize)]
 pub struct FactCheck {
     pub field: String,
     pub value: Option<Value>,
     pub received: bool,
-    /// OnePass's signature matches and the fact was not altered.
+    /// OnePass's signature matches and nothing in the stamp was altered.
     pub signature_ok: bool,
     /// The signing key is listed on the registry as OnePass's verifier key.
     pub signer_is_onepass: bool,
+    /// The stamp was issued to this company, for this request.
+    pub issued_to_me: bool,
+    /// The stamp has not expired.
+    pub in_date: bool,
     pub ok: bool,
 }
 
@@ -85,18 +91,27 @@ pub struct Verdict {
     pub checks: Vec<FactCheck>,
 }
 
+/// Who is checking, and when. A company knows its own name, which request it
+/// made, and what time it is; it compares the stamps against those.
+pub struct Checker<'a> {
+    pub company: &'a str,
+    pub request_id: &'a str,
+    pub now: u64,
+}
+
 /// Run the company's checks on what OnePass delivered.
 pub fn verify(
     wants: &[String],
-    delivered: &[SignedFact],
+    delivered: &[Stamp],
     trusted: &[TrustedSource],
+    checker: &Checker,
     registry: String,
     registry_url: Option<String>,
 ) -> Verdict {
     let checks: Vec<FactCheck> = wants
         .iter()
         .map(|want| {
-            let Some(fact) = delivered.iter().find(|f| f.field == *want) else {
+            let Some(stamp) = delivered.iter().find(|s| &s.field == want) else {
                 // The person chose not to share this one.
                 return FactCheck {
                     field: want.to_string(),
@@ -104,20 +119,26 @@ pub fn verify(
                     received: false,
                     signature_ok: false,
                     signer_is_onepass: false,
+                    issued_to_me: false,
+                    in_date: false,
                     ok: false,
                 };
             };
-            let signature_ok = verify_fact(fact);
+            let signature_ok = verify_stamp(stamp);
             let signer_is_onepass = trusted
                 .iter()
-                .any(|t| t.public_key == fact.source_key && t.kind == VERIFIER_KIND);
+                .any(|t| t.public_key == stamp.signer_key && t.kind == VERIFIER_KIND);
+            let issued_to_me = stamp.audience == checker.company && stamp.request_id == checker.request_id;
+            let in_date = checker.now < stamp.expires_at;
             FactCheck {
                 field: want.to_string(),
-                value: Some(fact.value.clone()),
+                value: Some(stamp.value.clone()),
                 received: true,
                 signature_ok,
                 signer_is_onepass,
-                ok: signature_ok && signer_is_onepass,
+                issued_to_me,
+                in_date,
+                ok: signature_ok && signer_is_onepass && issued_to_me && in_date,
             }
         })
         .collect();

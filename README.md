@@ -17,8 +17,9 @@ collect documents, and never learns which institutions the person uses.
 3. Only after approval, OnePass fetches each fact from that institution.
 4. OnePass checks the institution's digital signature and checks on **Stellar**
    that the institution is on the trusted registry. If not, it refuses.
-5. OnePass stamps each fact with its own signature and delivers it. The
-   institution's name is not passed on, and OnePass keeps no copy.
+5. OnePass stamps each fact with its own signature, made out to that company and
+   that request only, and delivers it. The institution's name is not passed on,
+   and OnePass wipes its copy 30 seconds later.
 6. The company checks OnePass's stamp against OnePass's key on **Stellar**.
 7. OnePass records a fingerprint of the verification on **Stellar** as a receipt.
 
@@ -73,11 +74,18 @@ Open `/app` and `/request` in two tabs side by side.
    Stellar registry. The company is only told that it could not be verified.
 6. **Tampering:** approve a request with "Demo: alter a fact in transit" ticked. The
    company's check fails, because OnePass's stamp no longer matches.
-7. **Deny** a request, or untick an item: the company gets only what was approved.
-8. **A second person:** switch "Signed in as" to Priya Nair on `/app`, and send a request
+7. **Passing it on:** on a verified result, click "Forward this result to Northgate
+   Rentals". The second company rejects it: each stamp names the company and request it
+   was issued for, and expires after ten minutes.
+8. **Deletion:** about 30 seconds after delivery, the result shows "OnePass's copy of
+   these facts: Deleted". The company keeps its copy; OnePass does not.
+9. **Deny** a request, or untick an item: the company gets only what was approved.
+10. **A second person:** switch "Signed in as" to Priya Nair on `/app`, and send a request
    for `priya`. Each person only sees requests about themselves.
 
 `cargo test` runs the signature and smart-contract checks.
+
+See [SECURITY.md](SECURITY.md) for what OnePass protects against and the prototype's known limits.
 
 ## Putting the registry on Stellar
 

@@ -13,7 +13,11 @@
 //!      and hands it to the company. The institution's name is not passed on.
 //!   6. The company checks OnePass's stamp against OnePass's key on Stellar.
 //!   7. OnePass records a fingerprint of what it vouched for on Stellar, as a
-//!      permanent receipt, and forgets the facts.
+//!      permanent receipt.
+//!   8. Thirty seconds after delivery, OnePass wipes its own copy of the facts.
+//!
+//! Each stamp is made out to one company and one request and expires after ten
+//! minutes, so it cannot be passed on or reused.
 //!
 //! It also serves the web pages: the landing page, the person's page and the
 //! requester page. Everything is kept in memory, so restarting resets the demo.
@@ -30,7 +34,7 @@ use axum::{
     Json, Router,
 };
 use directory::SourceInfo;
-use onepass_core::{fingerprint, sign_fact, stellar_address, verify_fact, SignedFact, SigningKey};
+use onepass_core::{fingerprint, sign_stamp, stellar_address, verify_fact, SignedFact, SigningKey, Stamp};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,6 +46,14 @@ use std::{
 
 /// Where the stand-in institutions are running.
 const SOURCES_URL: &str = "http://127.0.0.1:4001";
+
+/// How long a OnePass stamp stays valid after it is issued (10 minutes).
+/// The company must check it within that time; afterwards it is worthless.
+const STAMP_VALID_SECS: u64 = 600;
+
+/// How long OnePass keeps its own copy of delivered facts (30 seconds).
+/// Just long enough for the company to collect them; then they are wiped.
+const RETENTION_SECS: u64 = 30;
 
 /// The people who have a OnePass identity in the demo: (OnePass ID, name).
 /// The ID is also their username at the stand-in institutions.
@@ -85,8 +97,13 @@ struct Request {
     /// person only and never sent to the company (`skip` keeps it out).
     #[serde(skip)]
     refusal: Option<String>,
-    /// What the company received: facts stamped by OnePass. No institution names.
-    delivered: Vec<SignedFact>,
+    /// What the company received: facts stamped by OnePass for this company and
+    /// this request only. No institution names.
+    delivered: Vec<Stamp>,
+    /// When those stamps stop being valid.
+    expires_at: Option<u64>,
+    /// True once OnePass has wiped its own copy of the delivered facts.
+    purged: bool,
     verdict: Option<company::Verdict>,
     receipt: Option<Receipt>,
 }
@@ -270,6 +287,8 @@ async fn create_request(State(state): State<Shared>, Json(body): Json<NewRequest
         status: "pending".into(),
         refusal: None,
         delivered: Vec::new(),
+        expires_at: None,
+        purged: false,
         verdict: None,
         receipt: None,
     };
@@ -366,20 +385,22 @@ async fn approve(
     Path(id): Path<String>,
     Json(body): Json<Approval>,
 ) -> Result<Json<Value>, ApiError> {
-    let (wants, user) = {
+    let (wants, user, requester) = {
         let requests = state.requests.lock().unwrap();
         let request = requests.get(&id).ok_or_else(|| error(StatusCode::NOT_FOUND, "No such request"))?;
         if request.status != "pending" {
             return Err(error(StatusCode::CONFLICT, "This request was already answered"));
         }
-        (request.wants.clone(), request.user.clone())
+        (request.wants.clone(), request.user.clone(), request.requester.clone())
     };
+    let issued_at = now();
+    let expires_at = issued_at + STAMP_VALID_SECS;
 
     let sources = directory(&state).await?;
     let trusted = state.registry.trusted().await.map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
     let connections = state.connections.lock().unwrap().clone();
 
-    let mut delivered: Vec<SignedFact> = Vec::new();
+    let mut delivered: Vec<Stamp> = Vec::new();
     for field in wants.iter().filter(|f| body.choices.contains_key(*f)) {
         let source_id = &body.choices[field];
         let Some(source) = sources.iter().find(|s| &s.id == source_id) else {
@@ -416,17 +437,26 @@ async fn approve(
             );
         }
 
-        // Step 5: stamp it with OnePass's own signature. The institution's
+        // Step 5: stamp it with OnePass's own signature, made out to this
+        // company and this request only, with an expiry time. The institution's
         // signed original is dropped here; the company never sees it.
-        delivered.push(sign_fact(&state.onepass_key, field, &original.value, now()));
+        delivered.push(sign_stamp(
+            &state.onepass_key,
+            field,
+            &original.value,
+            &requester,
+            &id,
+            issued_at,
+            expires_at,
+        ));
     }
 
     // Step 7 (prepared now, sent below): a fingerprint of exactly what was vouched for.
     let receipt_fingerprint = fingerprint(&delivered);
 
     if body.tamper {
-        if let Some(fact) = delivered.first_mut() {
-            fact.value = match &fact.value {
+        if let Some(stamp) = delivered.first_mut() {
+            stamp.value = match &stamp.value {
                 Value::Bool(b) => json!(!b),
                 _ => json!("Someone Else"),
             };
@@ -438,6 +468,7 @@ async fn approve(
         &wants,
         &delivered,
         &trusted,
+        &company::Checker { company: &requester, request_id: &id, now: now() },
         state.registry.describe(),
         state.registry.explorer_url(),
     );
@@ -448,6 +479,7 @@ async fn approve(
         request.status = if verdict.ok { "verified" } else { "rejected" }.to_string();
         request.verdict = Some(verdict);
         request.delivered = delivered;
+        request.expires_at = Some(expires_at);
         request.receipt = Some(Receipt {
             fingerprint: receipt_fingerprint.clone(),
             status: "pending".to_string(),
@@ -459,10 +491,11 @@ async fn approve(
     // Step 7: write the receipt to Stellar in the background (it takes a few
     // seconds), so the person and the company are not kept waiting.
     let background = state.clone();
+    let receipt_id = id.clone();
     tokio::spawn(async move {
         let outcome = background.registry.record_receipt(&receipt_fingerprint).await;
         let mut requests = background.requests.lock().unwrap();
-        if let Some(receipt) = requests.get_mut(&id).and_then(|r| r.receipt.as_mut()) {
+        if let Some(receipt) = requests.get_mut(&receipt_id).and_then(|r| r.receipt.as_mut()) {
             match outcome {
                 Ok(()) => receipt.status = "recorded".to_string(),
                 Err(why) => {
@@ -473,7 +506,49 @@ async fn approve(
         }
     });
 
+    // Finally: once the company has had time to collect the facts, OnePass
+    // wipes its own copy. Only the receipt and the names of the facts remain.
+    let background = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(RETENTION_SECS)).await;
+        let mut requests = background.requests.lock().unwrap();
+        if let Some(request) = requests.get_mut(&id) {
+            request.delivered.clear();
+            if let Some(verdict) = request.verdict.as_mut() {
+                for check in verdict.checks.iter_mut() {
+                    check.value = None;
+                }
+            }
+            request.purged = true;
+        }
+    });
+
     Ok(Json(json!({ "status": status })))
+}
+
+#[derive(Deserialize)]
+struct Replay {
+    /// Stamps a company received earlier, now being shown to someone else.
+    stamps: Vec<Stamp>,
+    /// The company they are being shown to.
+    as_company: String,
+}
+
+/// POST /api/replay — DEMO: what happens if a company passes its stamps on?
+/// A second company runs the normal checks on stamps that were issued to the
+/// first. The signatures are genuine, but the stamps are not made out to it.
+async fn replay(State(state): State<Shared>, Json(body): Json<Replay>) -> Result<Json<company::Verdict>, ApiError> {
+    let trusted = state.registry.trusted().await.map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
+    let wants: Vec<String> = body.stamps.iter().map(|s| s.field.clone()).collect();
+    Ok(Json(company::verify(
+        &wants,
+        &body.stamps,
+        &trusted,
+        // The second company's own request would have a different id.
+        &company::Checker { company: &body.as_company, request_id: "a-different-request", now: now() },
+        state.registry.describe(),
+        state.registry.explorer_url(),
+    )))
 }
 
 /// POST /api/requests/{id}/deny — the person says no. Nothing is fetched or shared.
@@ -533,6 +608,7 @@ async fn main() {
         .route("/api/requests/{id}/approve", post(approve))
         .route("/api/requests/{id}/deny", post(deny))
         .route("/api/notifications", get(notifications))
+        .route("/api/replay", post(replay))
         .with_state(state.clone());
 
     let address = "127.0.0.1:4000";

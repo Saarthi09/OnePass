@@ -91,6 +91,7 @@ input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--gold); fle
 .pair .v { font-size: 15px; font-weight: 600; text-align: right; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .actions .wide { flex: 1; min-height: 48px; }
+.notice { font-size: 13px; line-height: 1.5; color: #F0D9A8; background: #1D1A12; border: 1px solid #5C5440; border-radius: 10px; padding: 10px 12px; }
 label.demo { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .history > div { display: flex; justify-content: space-between; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
 .history > div > span { text-align: right; flex: none; max-width: 45%; }

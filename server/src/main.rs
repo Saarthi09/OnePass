@@ -81,8 +81,8 @@ struct Request {
     id: String,
     /// The company asking.
     requester: String,
-    /// Whether the company proved it is who it says: "verified", "wrong_key"
-    /// or "unsigned" (see company::check_requester).
+    /// Whether the company proved it is who it says: "verified", "wrong_key",
+    /// "unregistered" or "unsigned" (see company::check_requester).
     requester_check: String,
     /// The OnePass ID and name of the person it is about.
     user: String,
@@ -321,6 +321,42 @@ async fn create_request(State(state): State<Shared>, Json(body): Json<NewRequest
     state.requests.lock().unwrap().insert(id.clone(), request);
     state.order.lock().unwrap().push(id.clone());
     Ok(Json(json!({ "id": id })))
+}
+
+// ───────────────────── Demo: the registry admin's switch ─────────────────────
+
+/// GET /api/demo/company — is the demo company on the registry right now?
+async fn demo_company(State(state): State<Shared>) -> Result<Json<Value>, ApiError> {
+    let trusted = state.registry.trusted().await.map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
+    let key = company::demo_company_key();
+    let registered = trusted
+        .iter()
+        .any(|t| t.public_key == key && t.kind == company::COMPANY_KIND && t.name == company::DEMO_COMPANY);
+    Ok(Json(json!({
+        "name": company::DEMO_COMPANY,
+        "registered": registered,
+        "on_stellar": state.registry.explorer_url().is_some(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SetCompany {
+    registered: bool,
+}
+
+/// POST /api/demo/company — DEMO: put the demo company on the registry, or take
+/// it off. This is the registry admin's job (in real use: after checking the
+/// company is genuine), not something a company can do for itself. On Stellar
+/// it is a real transaction on the smart contract.
+async fn set_demo_company(State(state): State<Shared>, Json(body): Json<SetCompany>) -> Result<Json<Value>, ApiError> {
+    let key = company::demo_company_key();
+    let outcome = if body.registered {
+        state.registry.add(&key, company::DEMO_COMPANY, company::COMPANY_KIND).await
+    } else {
+        state.registry.remove(&key).await
+    };
+    outcome.map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
+    demo_company(State(state)).await
 }
 
 /// GET /api/requests/{id} — what the COMPANY can see about its request.
@@ -635,6 +671,7 @@ async fn main() {
         .route("/api/requests/{id}/deny", post(deny))
         .route("/api/notifications", get(notifications))
         .route("/api/replay", post(replay))
+        .route("/api/demo/company", get(demo_company).post(set_demo_company))
         .with_state(state.clone());
 
     let address = "127.0.0.1:4000";

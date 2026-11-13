@@ -173,6 +173,11 @@
           el("strong", {}, "This may not be " + n.requester + ". "),
           "The request is signed, but not with the key registered to " + n.requester + " on the Stellar registry. Deny it unless you are certain.");
       }
+      if (n.requester_check === "unregistered") {
+        return el("div", { class: "notice" },
+          el("strong", {}, "Unverified requester. "),
+          n.requester + " is not on the Stellar registry of companies, so OnePass cannot confirm who is asking. Only approve if you were expecting it.");
+      }
       return el("div", { class: "notice" },
         el("strong", {}, "Unverified requester. "),
         "OnePass has not confirmed that this really is " + n.requester + ". Only approve if you were expecting it.");

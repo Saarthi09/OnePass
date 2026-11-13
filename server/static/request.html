@@ -25,6 +25,7 @@
         <div class="field">
           <label for="requester">Your company</label>
           <input id="requester" type="text" value="Harbour Talent" required>
+          <div class="demo-switch" id="registration"></div>
         </div>
 
         <div class="field">
@@ -86,6 +87,35 @@
         el("button", { type: "button", class: "pill", onclick: () => choose(p) }, p.name)));
       choose(presets[presets.length - 1]);
     }
+
+    // DEMO: the registry admin's switch. Puts Harbour Talent on the registry of
+    // companies or takes it off, so both cases can be shown: a verified company
+    // and an unverified one. On Stellar this is a real transaction.
+    async function registration(change) {
+      const box = document.getElementById("registration");
+      let c;
+      try {
+        if (change !== undefined) {
+          fill(box, el("span", { class: "waiting small" }, el("span", { class: "dot" }), "Updating the registry…"));
+          c = await api("/api/demo/company", { registered: change });
+        } else {
+          c = await api("/api/demo/company");
+        }
+      } catch (e) {
+        fill(box, el("span", { class: "small bad" }, e.message),
+          el("button", { type: "button", class: "pill", onclick: () => registration() }, "Try again"));
+        return;
+      }
+      const where = c.on_stellar ? "the Stellar registry" : "the registry";
+      fill(box,
+        el("span", { class: "tag " + (c.registered ? "ok" : "bad") }, c.registered ? "Registered company" : "Not registered"),
+        el("span", { class: "small muted grow" },
+          c.name + (c.registered ? " is on " + where + ". Its requests arrive as verified."
+                                 : " is not on " + where + ". Its requests arrive as unverified.")),
+        el("button", { type: "button", class: "pill", onclick: () => registration(!c.registered) },
+          c.registered ? "Demo: remove from registry" : "Demo: add to registry"));
+    }
+    registration();
 
     document.getElementById("form").addEventListener("submit", async (event) => {
       event.preventDefault();

@@ -59,7 +59,7 @@ fn request_message(requester: &str, user: &str, wants: &[String], reason: &str, 
 /// Harbour Talent has registered. Any other name has no key and sends its
 /// request unsigned.
 fn registered_key(requester: &str) -> Option<SigningKey> {
-    (requester == "Harbour Talent").then(|| demo_key("company:harbour-talent"))
+    (requester == DEMO_COMPANY).then(|| demo_key("company:harbour-talent"))
 }
 
 /// The company's side: sign a request, if this company has a key.
@@ -81,10 +81,18 @@ pub fn sign_request(
     })
 }
 
+/// The demo's registered company: its name and public key, as listed on the registry.
+pub const DEMO_COMPANY: &str = "Harbour Talent";
+
+pub fn demo_company_key() -> String {
+    stellar_address(&demo_key("company:harbour-talent").verifying_key())
+}
+
 /// OnePass's side: who is really asking?
-///   "verified"  = signed with the key registered to this company on Stellar
-///   "wrong_key" = signed, but not with a key registered to this company
-///   "unsigned"  = no proof at all
+///   "verified"     = signed with the key registered to this company on Stellar
+///   "wrong_key"    = the company is registered, but this was signed with a different key
+///   "unregistered" = signed, but no company of this name is on the registry
+///   "unsigned"     = no proof at all
 pub fn check_requester(
     requester: &str,
     user: &str,
@@ -99,9 +107,16 @@ pub fn check_requester(
     };
     let genuine = verify_text(&proof.key, &request_message(requester, user, wants, reason, proof.signed_at), &proof.signature);
     let fresh = now.abs_diff(proof.signed_at) <= REQUEST_FRESH_SECS;
-    let registered = trusted
+    // Is there a company of this name on the registry at all?
+    let mut registered_keys = trusted
         .iter()
-        .any(|t| t.public_key == proof.key && t.kind == COMPANY_KIND && t.name == requester);
+        .filter(|t| t.kind == COMPANY_KIND && t.name == requester)
+        .map(|t| &t.public_key)
+        .peekable();
+    if registered_keys.peek().is_none() {
+        return "unregistered";
+    }
+    let registered = registered_keys.any(|key| key == &proof.key);
     if genuine && fresh && registered {
         "verified"
     } else {
@@ -270,7 +285,7 @@ mod tests {
 
     #[test]
     fn company_removed_from_the_registry_is_not_verified() {
-        assert_eq!(check("Harbour Talent", false, &[], 1010), "wrong_key");
+        assert_eq!(check("Harbour Talent", false, &[], 1010), "unregistered");
     }
 
     #[test]

@@ -87,6 +87,16 @@ fn signature_matches(public_key: &str, text: &str, signature: &str) -> bool {
     public_key.verify(text.as_bytes(), &signature).is_ok()
 }
 
+/// Sign any piece of text. Returns the signature in base64.
+pub fn sign_text(key: &SigningKey, text: &str) -> String {
+    BASE64.encode(key.sign(text.as_bytes()).to_bytes())
+}
+
+/// Was `text` signed by the owner of `public_key` (a Stellar "G..." address)?
+pub fn verify_text(public_key: &str, text: &str, signature: &str) -> bool {
+    signature_matches(public_key, text, signature)
+}
+
 /// A fact stamped by OnePass for ONE company and ONE request.
 ///
 /// It differs from a `SignedFact` in what the signature covers. Besides the

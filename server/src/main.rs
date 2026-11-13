@@ -2,7 +2,8 @@
 //!
 //! How one request travels:
 //!   1. A company fills in the requester page: who it is about, which facts it
-//!      needs, and why.
+//!      needs, and why. A registered company signs the request, and OnePass
+//!      checks that signature against the company's key on the Stellar registry.
 //!   2. That person gets a notification on their OnePass page and approves or
 //!      denies. They also see, and can choose, which of their institutions each
 //!      fact will come from.
@@ -80,6 +81,9 @@ struct Request {
     id: String,
     /// The company asking.
     requester: String,
+    /// Whether the company proved it is who it says: "verified", "wrong_key"
+    /// or "unsigned" (see company::check_requester).
+    requester_check: String,
     /// The OnePass ID and name of the person it is about.
     user: String,
     user_name: String,
@@ -135,6 +139,13 @@ async fn directory(state: &AppState) -> Result<Vec<SourceInfo>, ApiError> {
     directory::load(&state.client, SOURCES_URL)
         .await
         .map_err(|e| error(StatusCode::BAD_GATEWAY, e))
+}
+
+/// A registry entry that may vouch for facts: a bank, university and so on.
+/// Companies are on the registry too, but only so they can be recognised when
+/// they ask. Being listed as a company gives no right to supply facts.
+fn is_institution(entry: &registry::TrustedSource) -> bool {
+    entry.kind != company::COMPANY_KIND && entry.kind != company::VERIFIER_KIND
 }
 
 fn random_id() -> String {
@@ -254,6 +265,9 @@ struct NewRequest {
     /// Why, in the company's words.
     #[serde(default)]
     reason: String,
+    /// DEMO: send this as a scammer using the company's name.
+    #[serde(default)]
+    impostor: bool,
 }
 
 /// POST /api/requests — a company asks for facts about a person.
@@ -277,12 +291,23 @@ async fn create_request(State(state): State<Shared>, Json(body): Json<NewRequest
         return Err(error(StatusCode::BAD_REQUEST, "Choose at least one item to request"));
     }
 
+    let reason = body.reason.trim().to_string();
+
+    // The company signs its request (the server plays the company's part here;
+    // see company::sign_request). Then OnePass checks who is really asking,
+    // against the companies listed on the Stellar registry.
+    let proof = company::sign_request(&requester, &user, &wants, &reason, now(), body.impostor);
+    let trusted = state.registry.trusted().await.unwrap_or_default();
+    let requester_check =
+        company::check_requester(&requester, &user, &wants, &reason, proof.as_ref(), &trusted, now()).to_string();
+
     let request = Request {
         id: random_id(),
         requester,
+        requester_check,
         user,
         user_name: name.to_string(),
-        reason: body.reason.trim().to_string(),
+        reason,
         wants,
         status: "pending".into(),
         refusal: None,
@@ -342,7 +367,7 @@ async fn notifications(State(state): State<Shared>, Query(who): Query<WhichUser>
                         .map(|s| {
                             json!({
                                 "id": s.id, "name": s.name,
-                                "registered": trusted.iter().any(|t| t.public_key == s.public_key),
+                                "registered": trusted.iter().any(|t| t.public_key == s.public_key && is_institution(t)),
                             })
                         })
                         .collect();
@@ -350,7 +375,8 @@ async fn notifications(State(state): State<Shared>, Query(who): Query<WhichUser>
                 })
                 .collect();
             json!({
-                "id": r.id, "requester": r.requester, "reason": r.reason, "status": r.status,
+                "id": r.id, "requester": r.requester, "requester_check": r.requester_check,
+                "reason": r.reason, "status": r.status,
                 "refusal": r.refusal, "wants": r.wants, "items": items,
             })
         })
@@ -429,7 +455,7 @@ async fn approve(
         if !verify_fact(&original) {
             return refuse(&state, &id, format!("{}'s signature did not check out.", source.name));
         }
-        if !trusted.iter().any(|t| t.public_key == original.source_key) {
+        if !trusted.iter().any(|t| t.public_key == original.source_key && is_institution(t)) {
             return refuse(
                 &state,
                 &id,

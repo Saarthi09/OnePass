@@ -5,6 +5,8 @@
 //!     before vouching for a fact)
 //!   * "which key is OnePass's own?" (companies ask this before accepting
 //!     OnePass's stamp)
+//!   * "which key belongs to this company?" (OnePass asks this before telling
+//!     a person that a request really comes from the company it names)
 //! It is also where OnePass records a receipt for every verification.
 //!
 //! STELLAR MODE (the real thing): the list lives in a smart contract on the
@@ -144,6 +146,8 @@ fn local_list() -> Vec<TrustedSource> {
         ("GA4K6NUZFXL3USVVOGVU2ZQD2YAOLQNDS2KITPVYWZQ7V2I3XXD76Z7R", "Maple Trust Bank", "bank"),
         ("GAGUIDWAQY6FV3AF5WMGHW2TYQOQH6PWYMA33BM5MASB7HQ4UFKFNFWR", "CityHome Housing", "housing"),
         (ONEPASS_KEY, "OnePass", "verifier"),
+        // A company that has registered, so its requests can be recognised.
+        ("GDT4YT2YQDWX65RZEZFTPSCZWJG5ZNEJLAARBFQLRNY75WADENDLQQ6A", "Harbour Talent", "company"),
     ]
     .into_iter()
     .map(|(public_key, name, kind)| TrustedSource {

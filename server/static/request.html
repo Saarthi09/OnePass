@@ -45,6 +45,8 @@
           <input id="reason" type="text" value="">
         </div>
 
+        <label class="demo" for="impostor"><input type="checkbox" id="impostor"> Demo: send this as a scammer using the company's name</label>
+
         <p class="error" id="error"></p>
         <button type="submit" class="gold pill big" style="align-self:flex-start">Send request</button>
       </form>
@@ -95,6 +97,7 @@
           user: document.getElementById("who").value,
           fields: Object.values(boxes).filter((b) => b.checked).map((b) => b.value),
           reason: document.getElementById("reason").value,
+          impostor: document.getElementById("impostor").checked,
         });
         watch(id);
       } catch (e) { error.textContent = e.message; }

@@ -145,9 +145,7 @@
       return el("div", { class: "card gold-edge" },
         el("div", { class: "head" }, el("span", { class: "eyebrow gold" }, "New request")),
         el("h2", {}, n.requester + " is asking for your information"),
-        el("div", { class: "notice" },
-          el("strong", {}, "Unverified requester. "),
-          "OnePass has not confirmed that this really is " + n.requester + ". Only approve if you were expecting it."),
+        requesterNotice(n),
         n.reason && el("p", { class: "muted" }, "Their reason: " + n.reason),
         el("p", { class: "small muted" }, "Untick anything you do not want to share and choose where each item comes from. The company is never told the source."),
         el("div", { class: "lines" }, rows.map((r) => r.row)),
@@ -160,6 +158,24 @@
           } }, "Approve and share"),
           el("button", { type: "button", class: "wide", onclick: () => answer("/deny", {}) }, "Deny")),
         el("label", { class: "demo", for: tamper.id }, tamper, "Demo: alter a fact in transit, to show the company catches it"));
+    }
+
+    // Who is really asking? OnePass checks the request's signature against the
+    // companies listed on the Stellar registry and says what it found.
+    function requesterNotice(n) {
+      if (n.requester_check === "verified") {
+        return el("div", { class: "notice good" },
+          el("strong", {}, "Verified company. "),
+          "This request is signed with " + n.requester + "'s key, which is listed on the Stellar registry.");
+      }
+      if (n.requester_check === "wrong_key") {
+        return el("div", { class: "notice danger" },
+          el("strong", {}, "This may not be " + n.requester + ". "),
+          "The request is signed, but not with the key registered to " + n.requester + " on the Stellar registry. Deny it unless you are certain.");
+      }
+      return el("div", { class: "notice" },
+        el("strong", {}, "Unverified requester. "),
+        "OnePass has not confirmed that this really is " + n.requester + ". Only approve if you were expecting it.");
     }
 
     function historyRow(n) {

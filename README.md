@@ -79,8 +79,13 @@ Open `/app` and `/request` in two tabs side by side.
    was issued for, and expires after ten minutes.
 8. **Deletion:** about 30 seconds after delivery, the result shows "OnePass's copy of
    these facts: Deleted". The company keeps its copy; OnePass does not.
-9. **Deny** a request, or untick an item: the company gets only what was approved.
-10. **A second person:** switch "Signed in as" to Priya Nair on `/app`, and send a request
+9. **Who is asking:** a request from Harbour Talent shows "Verified company" on `/app`,
+   because it is signed with the key registered to Harbour Talent on Stellar. Change the
+   company name to anything else and the person sees "Unverified requester". Tick "Demo:
+   send this as a scammer using the company's name" and the person is told the request
+   may not be from Harbour Talent at all.
+10. **Deny** a request, or untick an item: the company gets only what was approved.
+11. **A second person:** switch "Signed in as" to Priya Nair on `/app`, and send a request
    for `priya`. Each person only sees requests about themselves.
 
 `cargo test` runs the signature and smart-contract checks.
